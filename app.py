@@ -162,6 +162,7 @@ ss.setdefault("pdb_info", None)
 ss.setdefault("uniprot", "P30405")
 ss.setdefault("pocket", None)
 ss.setdefault("results", None)
+ss.setdefault("validated_data", {})  # {ligand_name: {dogrulanmis_skor, guven_durumu}}
 
 # ============================================================================
 # ADIM 1 — HEDEF SEÇİMİ
@@ -441,6 +442,25 @@ st.divider()
 # ============================================================================
 st.header("Adım 5 · Sonuçlar")
 
+# --- Doğrulama verisini yükle (varsa) ---
+_val_csv = ROOT / "results" / "validated_candidates.csv"
+if _val_csv.exists():
+    try:
+        _val_df = pd.read_csv(_val_csv)
+        for _, _vrow in _val_df.iterrows():
+            _lname = str(_vrow.get("ligand", "")).strip()
+            _dog = _vrow.get("dogrulanmis_skor")
+            _dur = str(_vrow.get("guven_durumu", "")).strip()
+            _frk = _vrow.get("fark")
+            if _lname:
+                ss["validated_data"][_lname] = {
+                    "dogrulanmis_skor": float(_dog) if _dog not in ("", None) and str(_dog) not in ("nan", "") else None,
+                    "guven_durumu": _dur,
+                    "fark": float(_frk) if _frk not in ("", None) and str(_frk) not in ("nan", "") else None,
+                }
+    except Exception:
+        pass
+
 if not ss["results"]:
     st.markdown("<div class='plain'>Henüz sonuç yok. Adım 4'te 'Üret ve Skorla' butonuna bas.</div>",
                 unsafe_allow_html=True)
@@ -471,25 +491,83 @@ else:
     st.markdown("### En iyi adaylar")
     for i, (smi, aff) in enumerate(results[:20]):
         props = mol_properties(smi)
+        mol_name = f"gen_{i:04d}"
+        # Doğrulama verisini al (hem adla hem SMILES ile dene)
+        val_info = ss["validated_data"].get(mol_name) or ss["validated_data"].get(smi[:20])
+
         with st.container():
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             left, right = st.columns([1, 1.6])
             with left:
                 img = draw_mol(smi)
                 if img is not None:
-                    st.image(img, caption=f"#{i+1} · gen_{i:04d}")
+                    st.image(img, caption=f"#{i+1} · {mol_name}")
                 st.markdown(f"<div class='plain' style='word-break:break-all'>{smi}</div>",
                             unsafe_allow_html=True)
+
             with right:
-                # Sağ üst: ham teknik veriler
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Affinity (kcal/mol)", f"{aff:.2f}")
-                m1.metric("MW", props.get("MW", "-"))
-                m2.metric("LogP", props.get("LogP", "-"))
-                m2.metric("TPSA", props.get("TPSA", "-"))
-                m3.metric("HBD / HBA", f"{props.get('HBD','-')} / {props.get('HBA','-')}")
-                m3.metric("QED", props.get("QED", "-"))
-                # Sağ alt: sade yorum
+                # ---- Doğrulama Durumu Rozeti ----
+                if val_info:
+                    dur = val_info.get("guven_durumu", "")
+                    dog_skor = val_info.get("dogrulanmis_skor")
+                    fark_val = val_info.get("fark")
+                    if dur == "GÜVENİLİR":
+                        badge_css = "background:#064E3B;color:#6EE7B7;border:1px solid #059669"
+                        badge_icon = "✓"
+                        aciklama = "Bu skor daha kapsamlı bir aramayla (yüksek exhaustiveness) doğrulandı."
+                    elif "ŞÜPHELİ" in dur:
+                        badge_css = "background:#451A03;color:#FCD34D;border:1px solid #D97706"
+                        badge_icon = "⚠"
+                        aciklama = "Bu skor yüksek exhaustiveness ile tutarsız çıktı — tekrar kontrol edilmesi önerilir."
+                    elif "ARTEFAKT" in dur:
+                        badge_css = "background:#450A0A;color:#FCA5A5;border:1px solid #DC2626"
+                        badge_icon = "✗"
+                        aciklama = "Bu skor ilk taramada artefakt olarak işaretlendi. Güvenilir olmayan bir skor olabilir."
+                    else:
+                        badge_css = "background:#1E293B;color:#94A3B8;border:1px solid #334155"
+                        badge_icon = "?"
+                        aciklama = "Doğrulama tamamlanamadı."
+
+                    st.markdown(
+                        f"""<div style='margin-bottom:10px'>
+                        <span style='padding:4px 12px;border-radius:20px;font-size:0.78rem;
+                            font-weight:700;font-family:monospace;{badge_css}'>
+                            {badge_icon} Doğrulama: {dur}
+                        </span>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+                    # Karşılaştırmalı skor satırı
+                    sc1, sc2, sc3 = st.columns(3)
+                    sc1.metric("İlk Skor (kcal/mol)", f"{aff:.2f}",
+                               help="Düşük exhaustiveness (hızlı tarama) ile bulunan skor.")
+                    if dog_skor is not None:
+                        delta_str = f"{fark_val:+.2f}" if fark_val is not None else ""
+                        sc2.metric("Doğrulanmış Skor", f"{dog_skor:.2f}",
+                                   delta=delta_str, delta_color="inverse",
+                                   help="Yüksek exhaustiveness ile yeniden docklama sonucu.")
+                    sc3.metric("MW", props.get("MW", "-"))
+                    st.markdown(f"<div class='plain' style='font-size:0.8rem;margin-top:4px'>ℹ️ {aciklama}</div>",
+                                unsafe_allow_html=True)
+                else:
+                    # Doğrulama yok — standart görünüm + bilgi notu
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Affinity (kcal/mol)", f"{aff:.2f}")
+                    m1.metric("MW", props.get("MW", "-"))
+                    m2.metric("LogP", props.get("LogP", "-"))
+                    m2.metric("TPSA", props.get("TPSA", "-"))
+                    m3.metric("HBD / HBA", f"{props.get('HBD','-')} / {props.get('HBA','-')}")
+                    m3.metric("QED", props.get("QED", "-"))
+                    st.markdown(
+                        "<div class='plain' style='font-size:0.78rem;color:#7E8C9A;margin-top:6px'>"
+                        "ℹ️ Bu skor ilk taramadan geliyor, henüz kapsamlı doğrulama yapılmadı — "
+                        "yanıltıcı olabilir. Doğrulamak için: "
+                        "<code>python src/validate_top_candidates.py --input results/docking_scores.csv ...</code>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # Sade yorum (her zaman göster)
                 st.markdown(f"<div class='plain'>💬 {interpret(smi, aff, props)}</div>",
                             unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)

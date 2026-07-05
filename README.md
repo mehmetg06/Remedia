@@ -89,6 +89,31 @@ python src/molecule_generator.py --method genetic \
     --size 20 20 20 --output data/generated.smi
 ```
 
+### Neden Doğrulama Gerekiyor?
+
+Düşük `exhaustiveness` (ör. 8, varsayılan) Vina'nın arama uzayını yeterince
+kapsamlı taramasını engelleyebilir. Genetik algoritma bu koşulda bazen "şanslı"
+ama gerçekçi olmayan bir bağlanma pozu bulur ve çok iyi görünen bir skor raporlar
+(örn. **−11.6 kcal/mol**). Aynı molekülü `exhaustiveness=32` ile yeniden
+docklandığında skor **−5.2 kcal/mol**'e düşebilir — aralarındaki 6.4 kcal/mol'lük
+fark, birinci sonucun bir **arama artefaktı** olduğunu gösterir, gerçek bir
+bağlanma gücünü değil.
+
+Bu yüzden `validate_top_candidates.py` adımı pipeline'a eklendi:
+en iyi N aday otomatik olarak yüksek exhaustiveness ile yeniden docklanır ve
+her molekül için **GÜVENİLİR / ŞÜPHELİ / ARTEFAKT OLASI** etiketi üretilir.
+
+```bash
+python src/validate_top_candidates.py \
+    --input results/docking_scores.csv \
+    --receptor data/P30405_alphafold.pdbqt \
+    --center 5.00 -1.02 -15.56 --size 20 20 20 \
+    --top-n 5 --exhaustiveness 32 \
+    --output results/validated_candidates.csv
+```
+
+Çıktı CSV sütunları: `ligand`, `ilk_skor`, `dogrulanmis_skor`, `fark`, `guven_durumu`.
+
 Üretilen molekülleri tam pipeline'a sokmak (Snakemake ile):
 
 ```bash

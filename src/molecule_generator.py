@@ -529,6 +529,63 @@ def main():
         print(f"[OK] GA tamamlandı, {len(mols)} molekül son popülasyonda.")
         write_smi(mols, args.output, scores=scores)
 
+        # ----------------------------------------------------------------
+        # OTOMATİK DOĞRULAMA: GA bittiğinde en iyi N adayı yüksek
+        # exhaustiveness ile yeniden dockla — artefakt skorları tespit et.
+        # ----------------------------------------------------------------
+        if args.receptor and args.center:
+            import csv as _csv
+            import tempfile as _tempfile
+
+            # GA skorlarını geçici bir CSV'ye yaz (validate_top_candidates'in beklediği format)
+            ga_scores_csv = Path(args.workdir) / "ga_final_scores.csv"
+            ga_scores_csv.parent.mkdir(parents=True, exist_ok=True)
+            with open(ga_scores_csv, "w", newline="") as _f:
+                _w = _csv.DictWriter(_f, fieldnames=["ligand", "affinity_kcal_mol"])
+                _w.writeheader()
+                for i, (smi, sc) in enumerate(final):
+                    _w.writerow({"ligand": f"gen_{i:04d}", "affinity_kcal_mol": sc})
+
+            # validate_top_candidates fonksiyonunu import et
+            try:
+                import validate_top_candidates as _vtc
+                val_exhaustiveness = args.exhaustiveness * 4  # ör. 8 → 32
+                val_output = Path("results/validated_candidates.csv")
+                print(f"\n[DOĞRULAMA] En iyi {5} aday exhaustiveness={val_exhaustiveness} ile yeniden docklaniyor...")
+                val_rows = _vtc.validate_top_candidates(
+                    scores_csv=ga_scores_csv,
+                    receptor_pdbqt=Path(args.receptor),
+                    center=list(args.center),
+                    box_size=list(args.size),
+                    top_n=5,
+                    exhaustiveness=val_exhaustiveness,
+                    ligand_dirs=[
+                        Path(args.workdir) / "prepared",
+                        Path(args.workdir) / "poses",
+                    ],
+                    output_csv=val_output,
+                )
+                # Özet tabloyu konsola yazdır
+                if val_rows:
+                    print("\n┌─ DOĞRULAMA ÖZETİ ─────────────────────────────────────────┐")
+                    print(f"│ {'Ligand':<14} {'İlk Skor':>9} {'Doğrulama':>10} {'Fark':>6} {'Durum':<30} │")
+                    print("│ " + "─" * 74 + " │")
+                    for vr in val_rows:
+                        ilk = vr.get('ilk_skor', '')
+                        dog = vr.get('dogrulanmis_skor', '')
+                        frk = vr.get('fark', '')
+                        dur = vr.get('guven_durumu', '')
+                        ilk_s = f"{ilk:.3f}" if isinstance(ilk, (int, float)) else str(ilk)
+                        dog_s = f"{dog:.3f}" if isinstance(dog, (int, float)) else str(dog)
+                        frk_s = f"{frk:.2f}" if isinstance(frk, (int, float)) else str(frk)
+                        sembol = {"GÜVENİLİR": "✓", "ŞÜPHELİ — tekrar kontrol et": "⚠", "ARTEFAKT OLASI — güvenme": "✗"}.get(dur, "?")
+                        print(f"│ {vr['ligand']:<14} {ilk_s:>9} {dog_s:>10} {frk_s:>6} {sembol} {dur:<28} │")
+                    print("└" + "─" * 76 + "┘")
+                    print(f"[OK] Detaylı doğrulama raporu: {val_output}")
+            except Exception as _ve:
+                print(f"[UYARI] Otomatik doğrulama çalışmadı: {_ve}")
+                print("       Elle çalıştırmak için: python src/validate_top_candidates.py --help")
+
     elif args.method == "pretrained":
         try:
             mols = generate_with_pretrained_model(seeds, n=args.n)
