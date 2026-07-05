@@ -1,0 +1,5 @@
+# SMILES  isim
+CC(=O)Oc1ccccc1C(=O)O  aspirin
+CN1C=NC2=C1C(=O)N(C(=O)N2C)C  caffeine
+CC(C)Cc1ccc(cc1)C(C)C(=O)O  ibuprofen
+O=C1CCC(=O)N1  succinimide_scaffold
