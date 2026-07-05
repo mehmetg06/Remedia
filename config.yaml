@@ -1,0 +1,50 @@
+# ============================================================================
+# Remedia — Reseptör Odaklı İlaç Keşif Pipeline'ı · Merkezi Konfigürasyon
+# ----------------------------------------------------------------------------
+# Tüm çalıştırma parametreleri burada. `snakemake --cores 1` bu dosyayı okur;
+# komut satırında tekrar tekrar parametre yazmana gerek yok.
+#
+# Bir parametreyi tek seferlik değiştirmek istersen:
+#     snakemake --cores 1 --config uniprot_id=Q99999
+# ============================================================================
+
+# --- Reseptör ---------------------------------------------------------------
+# AlphaFold DB'den indirilecek UniProt ID. Örnek: CypD / PPIF = P30405
+uniprot_id: "P30405"
+
+# --- Binding pocket (docking box) -------------------------------------------
+# Cebin merkez koordinatları (x, y, z) — Å cinsinden.
+# Varsayılan: CypD (P30405) Pocket 9 merkezi.
+pocket_center: [5.00, -1.02, -15.56]
+
+# Docking box boyutu (SX, SY, SZ) — Å cinsinden.
+box_size: [20.0, 20.0, 20.0]
+
+# --- Ligandlar --------------------------------------------------------------
+# Taranacak aday moleküllerin SMILES listesi (format: "SMILES  isim").
+ligands_file: "data/ligands_example.smi"
+
+# --- Docking ----------------------------------------------------------------
+# AutoDock Vina exhaustiveness (yükseldikçe daha kapsamlı ama yavaş arama).
+exhaustiveness: 8
+
+# --- ADMET filtresi ---------------------------------------------------------
+# "lipinski" = hızlı offline RDKit kuralları, "admetlab" = ADMETlab 3.0 API.
+admet_mode: "lipinski"
+
+# ============================================================================
+# Dashboard görsel meta verileri
+# ----------------------------------------------------------------------------
+# Affinity grafiği ve ADMET tablosu CSV'lerden OTOMATİK üretilir. Aşağıdaki
+# değerler ise fpocket/AlphaFold çıktısından gelen, docking CSV'sinde yer
+# almayan görsel bilgilerdir; cebi değiştirdiğinde buradan güncelle.
+# ============================================================================
+dashboard:
+  avg_plddt: 88.9          # AlphaFold ortalama pLDDT güven skoru
+  pocket_name: "Pocket 9"  # Seçilen cebin etiketi
+  pocket:
+    druggability: 0.168    # fpocket druggability score
+    volume: 384.8          # Cep hacmi (Å³)
+    apolar_sasa: 0.871     # Apolar SASA oranı
+    alpha_spheres: 31      # Alpha küre sayısı
+    flexibility: 0.993     # Esneklik
