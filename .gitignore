@@ -4,7 +4,11 @@ data/*.pdbqt
 data/*_out/
 data/*_out/**
 data/ligands_prepared/
+data/pocket_info.txt
 results/
+
+# Snakemake çalışma meta verileri
+.snakemake/
 
 # Python
 __pycache__/
