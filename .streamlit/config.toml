@@ -1,0 +1,14 @@
+# Remedia — Streamlit tema ayarları
+# dashboard.html'deki koyu tema + teal accent paletiyle tutarlı.
+# (bkz. dashboard.html :root CSS değişkenleri)
+
+[theme]
+base = "dark"
+primaryColor = "#5EEAD4"          # --accent (teal)
+backgroundColor = "#0A0E13"       # --bg
+secondaryBackgroundColor = "#10161D"  # --bg-panel
+textColor = "#E7ECF2"             # --text
+font = "sans serif"
+
+[server]
+headless = true

@@ -1,11 +1,14 @@
 # Receptor-Focused Drug Discovery Pipeline
 
 Açık kaynak, reseptör hedefli (structure-based) ilaç molekülü keşif pipeline'ı.
-AlphaFold DB → Pocket Detection → Virtual Screening → Docking (Vina) → ADMET Filtreleme
+Molekül Üretimi → AlphaFold DB → Pocket Detection → Docking (Vina) → ADMET Filtreleme
 
 ## Mimari
 
 ```
+        (opsiyonel) molecule_generator.py → sıfırdan YENİ molekül üret
+                    │  (random / BRICS / genetik algoritma)
+                    ▼
 Reseptör (UniProt ID / PDB ID)
         │
         ▼
@@ -15,7 +18,7 @@ Reseptör (UniProt ID / PDB ID)
 2. pocket_detection.py    → Binding site (cep) tespiti
         │
         ▼
-3. ligand_prep.py         → Aday moleküller (ZINC/ChEMBL'den veya SMILES listesi)
+3. ligand_prep.py         → Aday moleküller (SMILES listesi / generated.smi)
         │
         ▼
 4. docking.py             → AutoDock Vina ile skorlama
@@ -27,16 +30,73 @@ Reseptör (UniProt ID / PDB ID)
 6. rank_report.py         → Birleşik skor + rapor (CSV/HTML)
 ```
 
+Tüm bunları tek bir web arayüzünden yönetmek için: **`streamlit run app.py`**
+(aşağıya bkz.).
+
 ## Kurulum (GitHub Codespaces / Linux)
 
 ```bash
-pip install -r requirements.txt   # snakemake dahil tüm bağımlılıklar
+pip install -r requirements.txt   # snakemake, streamlit, rdkit dahil tüm bağımlılıklar
 # Vina binary (conda önerilir):
 conda install -c conda-forge vina
 # veya: pip install vina
 ```
 
-## Hızlı Başlangıç — Tek Komut
+## Hızlı Başlangıç — Web Arayüzü (UI)
+
+En kolay yol: tek komutla açılan Streamlit arayüzü. Codespaces'te de çalışır.
+
+```bash
+streamlit run app.py
+```
+
+Arayüz seni 5 adımda yönlendirir: **(1)** hedef protein seçimi → **(2)** bağlanma
+cebi → **(3)** molekül üretim yöntemi → **(4)** çalıştırma (canlı log) → **(5)**
+sonuçlar (2D çizim + skorlar + sade yorum + ham CSV indirme).
+
+Tasarım prensibi: **basit/gelişmiş diye ayrı mod yok**. Her ekranda ham teknik
+değer (ör. `pLDDT: 88.9`) İLE sade açıklaması (ör. "yapının ne kadar güvenilir
+tahmin edildiğini gösterir") yan yana, hep birlikte görünür. Teknik kullanıcı
+ham sayıları görür; hiç bilmeyen kullanıcı yanındaki cümleden anlar.
+
+## Yeni Molekül Üretimi (`molecule_generator.py`)
+
+Var olan molekülleri test etmenin ötesinde, **sıfırdan yeni aday molekül üretir** —
+model eğitmeden, yalnızca RDKit ile kimyasal kurallara dayanarak. Dört yöntem:
+
+| Yöntem | Ne yapar | Model gerekir mi? |
+|--------|----------|-------------------|
+| **random** | Tohum moleküle rastgele atom değişimi (C↔N↔O↔S) ve grup ekleme/çıkarma (metil, hidroksil, halojen); geçersizleri RDKit ile eler | Hayır |
+| **brics** | Moleküllerin fragmanlarını BRICS kurallarıyla söküp LEGO gibi yeniden birleştirir | Hayır |
+| **genetic** | Genetik algoritma: her nesilde docking ile skorlar (fitness = −affinity), en iyi %20'yi tutar, çaprazlama + mutasyonla yeniler | Hayır |
+| **pretrained** | REINVENT gibi HAZIR bir model için opsiyonel plugin arayüzü (stub) | Evet (opsiyonel) |
+
+Çıktı, mevcut pipeline'a **doğrudan** giren bir `.smi` dosyasıdır.
+
+```bash
+# Rastgele mutasyon
+python src/molecule_generator.py --method random \
+    --seeds "CC(=O)Oc1ccccc1C(=O)O" --n 50 --output data/generated.smi
+
+# BRICS rekombinasyonu (birden fazla tohum)
+python src/molecule_generator.py --method brics \
+    --seeds-file data/ligands_example.smi --n 50 --output data/generated.smi
+
+# Genetik algoritma (reseptör verilirse gerçek Vina docking; yoksa QED yedek fitness)
+python src/molecule_generator.py --method genetic \
+    --seeds-file data/ligands_example.smi --generations 10 --population 30 \
+    --receptor data/P30405_alphafold.pdbqt --center 5.00 -1.02 -15.56 \
+    --size 20 20 20 --output data/generated.smi
+```
+
+Üretilen molekülleri tam pipeline'a sokmak (Snakemake ile):
+
+```bash
+snakemake --cores 1 generate                                 # data/generated.smi üret
+snakemake --cores 1 --config ligands_file=data/generated.smi # dock + ADMET + sırala
+```
+
+## Hızlı Başlangıç — Tek Komut (CLI)
 
 Tüm pipeline artık **Snakemake** ile otomatik çalışıyor. Parametreler
 `config.yaml`'dan okunur; tek yapman gereken:
