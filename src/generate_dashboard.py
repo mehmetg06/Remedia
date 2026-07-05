@@ -55,10 +55,10 @@ def build_affinity_bars(ranking_rows):
     renk sınıfı güce göre teal/amber/coral olarak atanır.
     """
     scored = [
-        (r["ligand"], parse_affinity(r.get("affinity_kcal_mol")))
+        (r["ligand"], parse_affinity(r.get("affinity_kcal_mol")), r.get("skor_kaynagi", "real_docking"))
         for r in ranking_rows
     ]
-    scored = [(name, aff) for name, aff in scored if aff is not None]
+    scored = [(name, aff, mode) for name, aff, mode in scored if aff is not None]
     if not scored:
         return '      <div class="bar-row"><div class="bar-label">Veri yok</div></div>'
 
@@ -67,9 +67,11 @@ def build_affinity_bars(ranking_rows):
     best = abs(scored[0][1]) or 1.0
 
     rows = []
-    for i, (name, aff) in enumerate(scored):
+    for i, (name, aff, mode) in enumerate(scored):
         width = round(abs(aff) / best * 100)
         cls = "" if width >= 85 else (" mid" if width >= 60 else " low")
+        if mode == "qed_fallback":
+            cls += " qed-fallback"
         tag = '<span class="tag">en güçlü</span>' if i == 0 else ""
         label = html.escape(name.replace("_", " ").title())
         rows.append(

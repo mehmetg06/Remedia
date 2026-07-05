@@ -99,6 +99,8 @@ docklandığında skor **−5.2 kcal/mol**'e düşebilir — aralarındaki 6.4 k
 fark, birinci sonucun bir **arama artefaktı** olduğunu gösterir, gerçek bir
 bağlanma gücünü değil.
 
+> **⚠️ ÖNEMLİ NOT:** Genetik Algoritma (GA), skoru doğrudan maksimize etmeye çalıştığından, düşük arama yoğunluğundaki (exhaustiveness) bu "şişirilmiş artefakt skorları" bulup sömürmeye (exploit) aşırı yatkındır. Bu yüzden GA sonrasında elde edilen en iyi adayların yüksek `exhaustiveness` (ör. 32) ve farklı motorlarla (Smina/Vina çapraz doğrulama) **MUTLAKA** teyit edilmesi gerekir. Aksi takdirde GA, aslında iyi bağlanmayan ama şans eseri iyi skorlanmış "yalancı pozitif" (false positive) moleküllere erken yakınsayacaktır.
+
 Bu yüzden `validate_top_candidates.py` adımı pipeline'a eklendi:
 en iyi N aday otomatik olarak yüksek exhaustiveness ile yeniden docklanır ve
 her molekül için **GÜVENİLİR / ŞÜPHELİ / ARTEFAKT OLASI** etiketi üretilir.

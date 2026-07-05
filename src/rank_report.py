@@ -40,6 +40,7 @@ def main():
         combined.append({
             "ligand": name,
             "affinity_kcal_mol": affinity,
+            "skor_kaynagi": d.get("skor_kaynagi", "real_docking"),
             "admet_pass": passed_admet,
             "MW": a.get("MW", "-"),
             "LogP": a.get("LogP", "-"),

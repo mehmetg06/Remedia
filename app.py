@@ -555,8 +555,9 @@ seeds = [s.strip().split()[0] for s in seeds_text.splitlines() if s.strip() and 
 
 method = st.radio(
     "Yöntem",
-    ["random", "brics", "genetic", "pretrained"],
+    ["fusion", "random", "brics", "genetic", "pretrained"],
     format_func=lambda m: {
+        "fusion": "⚡ Füzyon (Önerilen) — tüm yöntemleri akıllıca birleştirir",
         "random": "🎲 Random Mutation",
         "brics": "🧩 BRICS Fragment Recombination",
         "genetic": "🧬 Genetic Algorithm",
@@ -566,7 +567,13 @@ method = st.radio(
 
 col_a, col_b = st.columns([1, 1.4])
 params = {}
-if method == "random":
+if method == "fusion":
+    with col_a:
+        st.markdown("<div class='plain'>Parametreler otomatik ayarlanır.</div>", unsafe_allow_html=True)
+    with col_b:
+        st.markdown("<div class='plain'><b>Füzyon (Önerilen)</b> — Önce çok sayıda çeşitli molekül üretir, ucuz filtrelerle en umut vericileri seçer, sonra sadece onları pahalı docking'le derinlemesine optimize eder.</div>",
+                    unsafe_allow_html=True)
+elif method == "random":
     with col_a:
         params["n"] = st.number_input("Üretilecek molekül sayısı (n)", 5, 500, 50)
     with col_b:
@@ -627,8 +634,14 @@ else:
                 "otomatik gerçek docking'e geçer). Üretim ve elemeler yine tam çalışır.</div>",
                 unsafe_allow_html=True)
 
+qed_fallback_consent = True
+if not use_real_docking and method in ["genetic", "fusion"]:
+    qed_fallback_consent = st.checkbox("Reseptör seçilmedi — sonuçlar gerçek bağlanma tahmini DEĞİL, sadece ilaç-benzerlik puanı olacak. Devam?", value=False)
+
 if st.button("▶️ Molekülleri Üret ve Skorla", type="primary"):
-    if not seeds:
+    if not use_real_docking and method in ["genetic", "fusion"] and not qed_fallback_consent:
+        st.error("Lütfen yukarıdaki uyarıyı onaylayın veya Adım 1'den bir reseptör seçin.")
+    elif not seeds:
         st.error("En az bir geçerli tohum SMILES gir.")
     elif method == "pretrained":
         st.warning("Pretrained model plugin'i kurulu değil (opsiyonel). "
@@ -662,7 +675,7 @@ if st.button("▶️ Molekülleri Üret ve Skorla", type="primary"):
                     with log_box:
                         st.code("\n".join(gen_log[-12:]), language=None)
 
-                final = mg.genetic_algorithm(
+                final, mode = mg.genetic_algorithm(
                     seeds,
                     generations=int(params["generations"]),
                     population_size=int(params["population"]),
@@ -671,17 +684,33 @@ if st.button("▶️ Molekülleri Üret ve Skorla", type="primary"):
                     log_fn=log_fn,
                 )
                 mols = [s for s, _ in final]
+            elif method == "fusion":
+                gen_log = []
+
+                def log_fn(msg):
+                    gen_log.append(msg)
+                    with log_box:
+                        st.code("\n".join(gen_log[-12:]), language=None)
+                        
+                final, mode = mg.fusion_generation(
+                    seeds,
+                    docking_opts=docking_opts,
+                    log_fn=log_fn,
+                )
+                mols = [s for s, _ in final]
 
         scored = []
-        if method == "genetic":
+        if method in ["genetic", "fusion"]:
             for smi, aff in final:
                 scored.append((smi, aff))
+            ss["mode"] = mode
         else:
             total = len(mols)
             for i, smi in enumerate(mols):
-                sc = mg.score_population([smi], docking_opts)
+                sc, current_mode = mg.score_population([smi], docking_opts)
                 aff = sc.get(smi, 999.0)
                 scored.append((smi, aff))
+                ss["mode"] = current_mode
                 progress.progress((i + 1) / max(total, 1))
                 best = min(a for _, a in scored)
                 summary.markdown(
@@ -851,16 +880,25 @@ else:
     if _val_csv.exists():
         try:
             _val_df = pd.read_csv(_val_csv)
+            _cv_csv = rdir / "cross_validated.csv"
+            cv_dict = {}
+            if _cv_csv.exists():
+                _cv_df = pd.read_csv(_cv_csv)
+                for _, _cr in _cv_df.iterrows():
+                    cv_dict[str(_cr["ligand"]).strip()] = _cr.get("tutarlilik_durumu", "— Sadece Vina test edildi")
+            
             for _, _vrow in _val_df.iterrows():
                 _lname = str(_vrow.get("ligand", "")).strip()
                 _dog = _vrow.get("dogrulanmis_skor")
                 _dur = str(_vrow.get("guven_durumu", "")).strip()
                 _frk = _vrow.get("fark")
+                _tutarlilik = cv_dict.get(_lname, "— Sadece Vina test edildi")
                 if _lname:
                     ss["validated_data"][_lname] = {
                         "dogrulanmis_skor": float(_dog) if _dog not in ("", None) and str(_dog) not in ("nan", "") else None,
                         "guven_durumu": _dur,
                         "fark": float(_frk) if _frk not in ("", None) and str(_frk) not in ("nan", "") else None,
+                        "tutarlilik": _tutarlilik,
                     }
         except Exception:
             pass
@@ -973,17 +1011,34 @@ else:
                             badge_icon = "?"
                             aciklama = "Doğrulama tamamlanamadı."
 
+                        tutarlilik = val_info.get("tutarlilik", "— Sadece Vina test edildi")
+                        if "TUTARLI" in tutarlilik and "TUTARSIZ" not in tutarlilik:
+                            tut_css = "background:#064E3B;color:#6EE7B7;border:1px solid #059669"
+                            tut_icon = "✓ İki motor da onaylıyor"
+                        elif "TUTARSIZ" in tutarlilik:
+                            tut_css = "background:#451A03;color:#FCD34D;border:1px solid #D97706"
+                            tut_icon = "⚠ Motorlar anlaşmıyor"
+                        else:
+                            tut_css = "background:#1E293B;color:#94A3B8;border:1px solid #334155"
+                            tut_icon = "— Sadece Vina test edildi"
+
                         st.markdown(
                             f"""<div style='margin-bottom:10px'>
                             <span style='padding:4px 12px;border-radius:20px;font-size:0.78rem;
                                 font-weight:700;font-family:monospace;{badge_css}'>
                                 {badge_icon} Doğrulama: {dur}
                             </span>
+                            <span style='padding:4px 12px;border-radius:20px;font-size:0.78rem;
+                                font-weight:700;font-family:monospace;{tut_css}; margin-left:8px'>
+                                {tut_icon}
+                            </span>
                             </div>""",
                             unsafe_allow_html=True,
                         )
                         sc1, sc2, sc3 = st.columns(3)
-                        sc1.metric("İlk Skor (kcal/mol)", f"{aff:.2f}")
+                        
+                        mode_badge = "<span style='background:#064E3B;color:#6EE7B7;padding:2px 6px;border-radius:4px;font-size:0.7rem;'>✓ Gerçek Docking Kullanıldı</span>" if ss.get("mode") == "real_docking" else "<span style='background:#7F1D1D;color:#FCA5A5;padding:2px 6px;border-radius:4px;font-size:0.7rem;'>⚠ Yedek QED Skoru — Reseptör Verilmedi</span>"
+                        sc1.markdown(f"**İlk Skor**<br><span class='tech' style='font-size:1.5rem'>{aff:.2f}</span><br>{mode_badge}", unsafe_allow_html=True)
                         if dog_skor is not None:
                             delta_str = f"{fark_val:+.2f}" if fark_val is not None else ""
                             sc2.metric("Doğrulanmış Skor", f"{dog_skor:.2f}", delta=delta_str, delta_color="inverse")
@@ -992,7 +1047,8 @@ else:
                                     unsafe_allow_html=True)
                     else:
                         m1, m2, m3 = st.columns(3)
-                        m1.metric("Affinity (kcal/mol)", f"{aff:.2f}")
+                        mode_badge = "<span style='background:#064E3B;color:#6EE7B7;padding:2px 6px;border-radius:4px;font-size:0.7rem;'>✓ Gerçek Docking Kullanıldı</span>" if ss.get("mode") == "real_docking" else "<span style='background:#7F1D1D;color:#FCA5A5;padding:2px 6px;border-radius:4px;font-size:0.7rem;'>⚠ Yedek QED Skoru — Reseptör Verilmedi</span>"
+                        m1.markdown(f"**Affinity (kcal/mol)**<br><span class='tech' style='font-size:1.5rem'>{aff:.2f}</span><br>{mode_badge}", unsafe_allow_html=True)
                         m1.metric("MW", props.get("MW", "-"))
                         m2.metric("LogP", props.get("LogP", "-"))
                         m2.metric("TPSA", props.get("TPSA", "-"))

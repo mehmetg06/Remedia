@@ -36,14 +36,14 @@ def dock_all(receptor_pdbqt: Path, ligands_dir: Path, center, box_size,
             v.dock(exhaustiveness=exhaustiveness, n_poses=10)
             energies = v.energies(n_poses=1)
             best_score = float(energies[0][0])
-            results.append({"ligand": lig_path.stem, "affinity_kcal_mol": best_score})
+            results.append({"ligand": lig_path.stem, "affinity_kcal_mol": best_score, "skor_kaynagi": "real_docking"})
             print(f"[OK] {lig_path.stem}: {best_score:.3f} kcal/mol")
 
             out_pose = poses_dir / f"{lig_path.stem}_docked.pdbqt"
             v.write_poses(str(out_pose), n_poses=1, overwrite=True)
         except Exception as e:
             print(f"[HATA] {lig_path.stem}: {e}")
-            results.append({"ligand": lig_path.stem, "affinity_kcal_mol": None})
+            results.append({"ligand": lig_path.stem, "affinity_kcal_mol": None, "skor_kaynagi": "real_docking"})
 
     return results
 
@@ -72,7 +72,7 @@ def main():
     results.sort(key=lambda r: (r["affinity_kcal_mol"] is None, r["affinity_kcal_mol"]))
 
     with open(args.output, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["ligand", "affinity_kcal_mol"])
+        writer = csv.DictWriter(f, fieldnames=["ligand", "affinity_kcal_mol", "skor_kaynagi"])
         writer.writeheader()
         writer.writerows(results)
 

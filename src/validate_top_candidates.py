@@ -46,22 +46,31 @@ GUVEN_SUPHE = "ŞÜPHELİ — tekrar kontrol et"
 GUVEN_ARTEFAKT = "ARTEFAKT OLASI — güvenme"
 
 
-def guven_durumu(fark: float) -> str:
+def guven_durumu(ilk_skor: float, dogrulanmis_skor: float) -> tuple[str, str]:
     """
-    İlk skor ile doğrulama skoru arasındaki mutlak farka göre güven durumu
-    belirler. Negatif affinite yönünde, skor iyiden kötüye giderse fark pozitif.
-
-    Args:
-        fark: abs(ilk_skor - dogrulanmis_skor) — kcal/mol cinsinden.
-
+    İlk skor ile doğrulama skoru arasındaki farka ve YÖNÜNE göre güven durumu
+    belirler.
+    
     Returns:
-        'GÜVENİLİR' | 'ŞÜPHELİ — tekrar kontrol et' | 'ARTEFAKT OLASI — güvenme'
+        (guven_durumu, yon)
+        yon: 'iyilesti' veya 'kotulesti'
     """
-    if fark <= 1.0:
-        return GUVEN_GUVENILIR
-    if fark <= 2.5:
-        return GUVEN_SUPHE
-    return GUVEN_ARTEFAKT
+    fark = abs(ilk_skor - dogrulanmis_skor)
+    
+    if dogrulanmis_skor <= ilk_skor: # Daha negatif olduysa iyileşti (güçlü bağlanma)
+        yon = "iyilesti"
+        if fark <= 1.0:
+            return GUVEN_GUVENILIR, yon
+        else:
+            return "GÜÇLÜ ADAY — ilk tarama hafife almış", yon
+    else: # Skor kötüleşti (daha zayıf bağlanma)
+        yon = "kotulesti"
+        if fark <= 1.0:
+            return GUVEN_GUVENILIR, yon
+        elif fark <= 2.5:
+            return GUVEN_SUPHE, yon
+        else:
+            return GUVEN_ARTEFAKT, yon
 
 
 # ============================================================================
@@ -236,6 +245,7 @@ def validate_top_candidates(
                 "ilk_skor": ilk_skor,
                 "dogrulanmis_skor": "",
                 "fark": "",
+                "yon": "",
                 "guven_durumu": "DOĞRULANAMADI — PDBQT bulunamadı",
             })
             continue
@@ -257,15 +267,16 @@ def validate_top_candidates(
                 "ilk_skor": ilk_skor,
                 "dogrulanmis_skor": "",
                 "fark": "",
+                "yon": "",
                 "guven_durumu": "DOĞRULANAMADI — Vina hatası",
             })
             continue
 
         fark_val = abs(ilk_skor - dogrulanmis_skor)
-        durum = guven_durumu(fark_val)
+        durum, yon = guven_durumu(ilk_skor, dogrulanmis_skor)
 
         # Konsol çıktısı
-        durum_sembol = {"GÜVENİLİR": "✓", "ŞÜPHELİ — tekrar kontrol et": "⚠", "ARTEFAKT OLASI — güvenme": "✗"}.get(durum, "?")
+        durum_sembol = {"GÜVENİLİR": "✓", "ŞÜPHELİ — tekrar kontrol et": "⚠", "ARTEFAKT OLASI — güvenme": "✗", "GÜÇLÜ ADAY — ilk tarama hafife almış": "⭐"}.get(durum, "?")
         print(f"{dogrulanmis_skor:.3f}  (Δ={fark_val:.2f})  {durum_sembol} {durum}")
 
         comparison_rows.append({
@@ -273,6 +284,7 @@ def validate_top_candidates(
             "ilk_skor": round(ilk_skor, 4),
             "dogrulanmis_skor": round(dogrulanmis_skor, 4),
             "fark": round(fark_val, 4),
+            "yon": yon,
             "guven_durumu": durum,
         })
 
@@ -281,12 +293,35 @@ def validate_top_candidates(
     # --- Çıktıyı kaydet ---
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(output_csv, "w", newline="") as f:
-        fieldnames = ["ligand", "ilk_skor", "dogrulanmis_skor", "fark", "guven_durumu"]
+        fieldnames = ["ligand", "ilk_skor", "dogrulanmis_skor", "fark", "yon", "guven_durumu"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(comparison_rows)
 
     print(f"[OK] Doğrulama sonuçları kaydedildi: {output_csv}")
+
+    # --- Smina Cross Validation ---
+    try:
+        import cross_validate_docking as cvd
+        smina_output_csv = output_csv.parent / "cross_validated.csv"
+        print(f"\n[Smina Çapraz Doğrulama] Smina ile cross validation başlatılıyor...")
+        cv_results = cvd.cross_validate(
+            smiles_csv=output_csv,
+            receptor_pdbqt=receptor_pdbqt,
+            center=center,
+            box_size=box_size,
+            ligand_dirs=ligand_dirs,
+            top_n=top_n
+        )
+        if cv_results:
+            with open(smina_output_csv, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["ligand", "vina_affinity", "smina_affinity", "fark", "tutarlilik_durumu"])
+                writer.writeheader()
+                writer.writerows(cv_results)
+            print(f"[OK] Smina çapraz doğrulama sonuçları kaydedildi: {smina_output_csv}")
+    except Exception as e:
+        print(f"  [UYARI] Smina çapraz doğrulama çalışmadı: {e}")
+
     return comparison_rows
 
 

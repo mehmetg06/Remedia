@@ -1,0 +1,31 @@
+REMARK SMILES CN(C(=O)O)c1c(F)cc(Br)cc1OCl
+REMARK SMILES IDX 1 1 2 2 3 3 4 4 5 5 6 7 7 8 13 9 9 10 12 11 10 12 8 13 11 14
+REMARK SMILES IDX 14 15 15 16
+REMARK H PARENT 5 6
+ROOT
+ATOM      1  C   UNL     1      -2.119   0.093  -1.320  1.00  0.00     0.157 C 
+ATOM      2  N   UNL     1      -1.378   0.021  -0.072  1.00  0.00    -0.275 N 
+ENDROOT
+BRANCH   2   3
+ATOM      3  C   UNL     1      -2.123   0.046   1.096  1.00  0.00     0.411 C 
+ATOM      4  O   UNL     1      -3.334  -0.093   1.189  1.00  0.00    -0.224 OA
+BRANCH   3   5
+ATOM      5  O   UNL     1      -1.426   0.338   2.213  1.00  0.00    -0.465 OA
+ATOM      6  H   UNL     1      -2.120   0.340   2.903  1.00  0.00     0.298 HD
+ENDBRANCH   3   5
+ENDBRANCH   2   3
+BRANCH   2   7
+ATOM      7  C   UNL     1       0.053   0.090  -0.112  1.00  0.00     0.127 A 
+ATOM      8  C   UNL     1       0.708   0.888  -1.066  1.00  0.00     0.152 A 
+ATOM      9  C   UNL     1       0.868  -0.659   0.757  1.00  0.00     0.174 A 
+ATOM     10  C   UNL     1       2.099   0.989  -1.119  1.00  0.00     0.057 A 
+ATOM     11  C   UNL     1       2.265  -0.553   0.727  1.00  0.00     0.067 A 
+ATOM     12  C   UNL     1       2.872   0.274  -0.212  1.00  0.00     0.024 A 
+ATOM     13  F   UNL     1       0.006   1.625  -1.941  1.00  0.00    -0.204 F 
+ATOM     14  Br  UNL     1       4.755   0.411  -0.270  1.00  0.00    -0.051 Br
+BRANCH   9  15
+ATOM     15  O   UNL     1       0.342  -1.566   1.644  1.00  0.00    -0.383 OA
+ATOM     16  Cl  UNL     1       0.075  -3.075   0.939  1.00  0.00     0.135 Cl
+ENDBRANCH   9  15
+ENDBRANCH   2   7
+TORSDOF 4

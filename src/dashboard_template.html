@@ -131,6 +131,7 @@
   .bar-fill.low{ background: linear-gradient(90deg, rgba(240,114,90,0.4), var(--coral)); }
   .bar-value{ font-family:'IBM Plex Mono', monospace; font-size: 13px; text-align:right; font-weight:500;}
   .bar-value .unit{ color: var(--text-dim); font-size:10.5px; margin-left:2px;}
+  .bar-fill.qed-fallback{ background: repeating-linear-gradient(45deg, rgba(94,234,212,0.1), rgba(94,234,212,0.1) 4px, rgba(94,234,212,0.4) 4px, rgba(94,234,212,0.4) 8px); opacity: 0.8; border: 1px dashed rgba(94,234,212,0.5); }
 
   table{ width:100%; border-collapse:collapse; font-size: 13px; }
   th{ text-align:left; font-family:'IBM Plex Mono',monospace; font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color: var(--text-dim); font-weight:500; padding: 0 12px 10px; border-bottom:1px solid var(--border);}
@@ -209,6 +210,10 @@
     <div class="sec-head">
       <div class="sec-title">Bağlanma Afinitesi</div>
       <div class="sec-note">AutoDock Vina · exhaustiveness={{EXHAUSTIVENESS}}</div>
+    </div>
+    <div style="font-size: 11px; margin-bottom: 12px; display: flex; gap: 16px; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace;">
+      <div style="display:flex; align-items:center; gap:6px;"><div style="width:16px; height:8px; background:linear-gradient(90deg, rgba(94,234,212,0.5), var(--accent)); border-radius:2px;"></div> Gerçek Docking</div>
+      <div style="display:flex; align-items:center; gap:6px;"><div style="width:16px; height:8px; background:repeating-linear-gradient(45deg, rgba(94,234,212,0.1), rgba(94,234,212,0.1) 4px, rgba(94,234,212,0.4) 4px, rgba(94,234,212,0.4) 8px); border-radius:2px; opacity:0.8;"></div> QED Yedek Skoru (Reseptörsüz)</div>
     </div>
     <div class="chart" id="chart">
 {{AFFINITY_BARS}}

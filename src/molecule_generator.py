@@ -42,6 +42,7 @@ from pathlib import Path
 from rdkit import Chem
 from rdkit import RDLogger
 from rdkit.Chem import AllChem, BRICS, Descriptors, QED
+from rdkit.Chem.Scaffolds import MurckoScaffold
 
 # RDKit'in sanitization uyarılarını sustur — geçersiz varyantları zaten
 # kendimiz eleyeceğiz, log'u kirletmesinler.
@@ -265,21 +266,12 @@ def _pseudo_affinity(smi: str) -> float:
     return -(2.0 + qed * 10.0)
 
 
-def score_population(smiles_list: list[str], docking_opts: dict | None) -> dict[str, float]:
-    """Popülasyondaki her molekülü skorlar.
-
-    docking_opts verilmişse (reseptör + kutu) gerçek pipeline'ı çalıştırır:
-        SMILES → ligand_prep (3D/PDBQT) → docking.dock_all (Vina).
-    Aksi halde QED tabanlı yedek fitness'e düşer, böylece Vina kurulu olmadan da
-    algoritma çalışır.
-
-    Döndürür: {SMILES: affinity_kcal_mol}. Skorlanamayan moleküller büyük (kötü)
-    bir ceza değeriyle işaretlenir ki elenme eğiliminde olsunlar.
-    """
+def score_population(smiles_list: list[str], docking_opts: dict | None) -> tuple[dict[str, float], str]:
+    """Popülasyondaki her molekülü skorlar ve hangi modun kullanıldığını döndürür."""
     if not docking_opts:
-        return {smi: _pseudo_affinity(smi) for smi in smiles_list}
+        return {smi: _pseudo_affinity(smi) for smi in smiles_list}, "qed_fallback"
 
-    scores = _dock_smiles(
+    scores, mode = _dock_smiles(
         smiles_list,
         receptor=docking_opts["receptor"],
         center=docking_opts["center"],
@@ -287,9 +279,8 @@ def score_population(smiles_list: list[str], docking_opts: dict | None) -> dict[
         workdir=docking_opts["workdir"],
         exhaustiveness=docking_opts.get("exhaustiveness", 8),
     )
-    # Docking başarısız olanlara ceza (elenmeleri için).
     return {smi: (scores.get(smi) if scores.get(smi) is not None else 999.0)
-            for smi in smiles_list}
+            for smi in smiles_list}, mode
 
 
 def _dock_smiles(smiles_list, receptor, center, box_size, workdir, exhaustiveness=8):
@@ -307,7 +298,7 @@ def _dock_smiles(smiles_list, receptor, center, box_size, workdir, exhaustivenes
         import docking  # noqa: E402
     except Exception as e:
         print(f"[UYARI] Docking modülleri yüklenemedi ({e}); yedek fitness kullanılıyor.")
-        return {smi: _pseudo_affinity(smi) for smi in smiles_list}
+        return {smi: _pseudo_affinity(smi) for smi in smiles_list}, "qed_fallback"
 
     workdir = Path(workdir)
     prepared = workdir / "prepared"
@@ -333,14 +324,14 @@ def _dock_smiles(smiles_list, receptor, center, box_size, workdir, exhaustivenes
         )
     except Exception as e:
         print(f"[UYARI] Vina docking çalışmadı ({e}); yedek fitness kullanılıyor.")
-        return {smi: _pseudo_affinity(smi) for smi in smiles_list}
+        return {smi: _pseudo_affinity(smi) for smi in smiles_list}, "qed_fallback"
 
     smi_scores = {}
     for r in results:
         smi = name_to_smi.get(r["ligand"])
         if smi is not None:
             smi_scores[smi] = r["affinity_kcal_mol"]
-    return smi_scores
+    return smi_scores, "real_docking"
 
 
 def genetic_algorithm(
@@ -351,17 +342,10 @@ def genetic_algorithm(
     mutation_rate: float = 0.30,
     docking_opts: dict | None = None,
     log_fn=print,
-) -> list[tuple[str, float]]:
-    """Genetik algoritma ile molekül optimizasyonu.
-
-    - Başlangıç popülasyonu: tohumlar + random mutasyon + BRICS ürünleri.
-    - Her nesilde: popülasyonu skorla (fitness = -affinity → daha negatif daha iyi),
-      en iyi %`elite_frac`'i tut, gerisini çaprazlama + mutasyonla yeniden üret.
-    - Her neslin en iyi molekülünü ve skorunu loglar.
-
-    Döndürür: son popülasyonu (SMILES, affinity) çiftleri olarak, en iyiden kötüye
-    sıralı.
-    """
+    refresh_every: int = 3,
+    adaptive_mutation: bool = True,
+    scaffold_diversity_threshold: float = 0.3,
+) -> tuple[list[tuple[str, float]], str]:
     # --- Başlangıç popülasyonu ---
     seed_set = [s for s in seeds if Chem.MolFromSmiles(s) is not None]
     population = set(Chem.MolToSmiles(Chem.MolFromSmiles(s)) for s in seed_set)
@@ -370,27 +354,52 @@ def genetic_algorithm(
     population = list(population)[:population_size]
     if not population:
         log_fn("[HATA] Geçerli tohum molekül yok, GA başlatılamadı.")
-        return []
+        return [], "qed_fallback"
 
     n_elite = max(1, int(len(population) * elite_frac))
     history = []
+    current_mode = "qed_fallback"
 
     for gen in range(1, generations + 1):
-        scores = score_population(population, docking_opts)
+        scores, current_mode = score_population(population, docking_opts)
         # Daha negatif affinity = daha iyi fitness → küçükten büyüğe sırala.
         ranked = sorted(population, key=lambda s: scores.get(s, 999.0))
         best_smi = ranked[0]
         best_score = scores.get(best_smi, 999.0)
         history.append((best_smi, best_score))
-        log_fn(f"[Nesil {gen:2d}/{generations}] en iyi: {best_score:>8.3f} kcal/mol  {best_smi}")
+        
+        # Çeşitlilik ölçümü
+        scaffolds = set()
+        for s in population:
+            mol = Chem.MolFromSmiles(s)
+            if mol:
+                scaffold = MurckoScaffold.GetScaffoldForMol(mol)
+                scaffolds.add(Chem.MolToSmiles(scaffold))
+        diversity = len(scaffolds) / population_size
+
+        log_fn(f"[Nesil {gen:2d}/{generations}] en iyi: {best_score:>8.3f} kcal/mol | benzersiz scaffold: {len(scaffolds)}/{population_size} (çeşitlilik: %{diversity*100:.0f})")
+
+        # Adaptif mutasyon
+        if adaptive_mutation and len(history) >= 3:
+            if history[-1][1] >= history[-3][1] and diversity < scaffold_diversity_threshold:
+                mutation_rate = min(1.0, mutation_rate * 1.5)
+                log_fn(f"  [UYARI] Yakınsama tespit edildi, mutasyon oranı artırıldı: {mutation_rate:.2f}")
 
         if gen == generations:
-            # Son nesli skorlarıyla döndür.
-            return [(s, scores.get(s, 999.0)) for s in ranked]
+            return [(s, scores.get(s, 999.0)) for s in ranked], current_mode
 
         # --- Yeni nesil: elit + çaprazlama/mutasyon ---
         elites = ranked[:n_elite]
         new_pop = set(elites)
+        
+        # Tazelik enjeksiyonu
+        if gen % refresh_every == 0 and gen < generations:
+            log_fn(f"  [TAZELİK ENJEKSİYONU] Popülasyonun en kötü %20'si yeni rastgele bireylerle değiştiriliyor.")
+            num_replace = max(1, int(population_size * 0.2))
+            fresh = random_mutation(seed_set, n=num_replace)
+            for f in fresh:
+                new_pop.add(f)
+
         guard = 0
         while len(new_pop) < population_size and guard < population_size * 40:
             guard += 1
@@ -404,10 +413,9 @@ def genetic_algorithm(
                 new_pop.add(child)
         population = list(new_pop)[:population_size]
 
-    # Buraya normalde ulaşılmaz.
-    final_scores = score_population(population, docking_opts)
+    final_scores, current_mode = score_population(population, docking_opts)
     ranked = sorted(population, key=lambda s: final_scores.get(s, 999.0))
-    return [(s, final_scores.get(s, 999.0)) for s in ranked]
+    return [(s, final_scores.get(s, 999.0)) for s in ranked], current_mode
 
 
 # ============================================================================
@@ -434,6 +442,94 @@ def generate_with_pretrained_model(seeds: list[str], n: int, model_config: dict 
         "generate_with_pretrained_model() gövdesini modelinin API'siyle doldur. "
         "Diğer yöntemler (random / brics / genetic) bu olmadan tam çalışır."
     )
+
+# ============================================================================
+# e) FÜZYON ÜRETİM MOTORU
+# ============================================================================
+def fusion_generation(
+    seeds: list[str],
+    docking_opts: dict | None,
+    log_fn=print
+) -> tuple[list[tuple[str, float]], str]:
+    """Dört aşamalı füzyon üretim motoru: Geniş keşif -> Ön Eleme -> Genetik Opt. -> Son Rafinasyon"""
+    log_fn("⚡ FÜZYON ÜRETİM MOTORU BAŞLIYOR ⚡")
+    # AŞAMA A — GENİŞ KEŞİF
+    log_fn("\n--- AŞAMA A: GENİŞ KEŞİF ---")
+    pool = set()
+    seed_set = [s for s in seeds if Chem.MolFromSmiles(s) is not None]
+    
+    mut_pool = random_mutation(seed_set, n=50)
+    pool.update(mut_pool)
+    brics_pool = brics_recombination(seed_set, n=50)
+    pool.update(brics_pool)
+    pool_list = list(pool)
+    log_fn(f"Keşif havuzu boyutu: {len(pool_list)}")
+
+    # AŞAMA B — ÖN ELEME
+    log_fn("\n--- AŞAMA B: ÖN ELEME ---")
+    passed_pre_screen = []
+    
+    import sys
+    src_dir = Path(__file__).resolve().parent
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    import admet_filter
+    
+    for smi in pool_list:
+        if not is_reasonable(smi):
+            continue
+        mol = Chem.MolFromSmiles(smi)
+        if not mol:
+            continue
+        try:
+            q = QED.qed(mol)
+        except:
+            q = 0.0
+        if q < 0.3:
+            continue
+            
+        admet_res = admet_filter.lipinski_veber_filter(smi, "test")
+        if admet_res.get("pass"):
+            passed_pre_screen.append(smi)
+            
+    log_fn(f"Ön elemeyi geçen (Makul + QED>0.3 + Lipinski onaylı): {len(passed_pre_screen)}")
+    if not passed_pre_screen:
+        log_fn("Ön elemeyi geçen molekül kalmadı! Tohumlarla devam ediliyor.")
+        passed_pre_screen = seed_set
+
+    # AŞAMA C — GENETİK OPTİMİZASYON
+    log_fn("\n--- AŞAMA C: GENETİK OPTİMİZASYON ---")
+    ga_results, mode = genetic_algorithm(
+        passed_pre_screen,
+        generations=5, # Daha kısa GA
+        population_size=30,
+        docking_opts=docking_opts,
+        log_fn=log_fn
+    )
+    if not ga_results:
+        return [], "qed_fallback"
+        
+    top_ga = [smi for smi, sc in ga_results[:5]]
+    
+    # AŞAMA D — SON RAFİNASYON
+    log_fn("\n--- AŞAMA D: SON RAFİNASYON ---")
+    refined_pool = set(top_ga)
+    for smi in top_ga:
+        for _ in range(3):
+            mut = mutate_once(smi)
+            if mut and is_reasonable(mut):
+                refined_pool.add(mut)
+                
+    refined_list = list(refined_pool)
+    log_fn(f"Rafinasyon havuzu (Top GA + küçük mutasyonlar): {len(refined_list)}")
+    
+    final_scores, final_mode = score_population(refined_list, docking_opts)
+    final_ranked = sorted(refined_list, key=lambda s: final_scores.get(s, 999.0))
+    final_output = [(s, final_scores.get(s, 999.0)) for s in final_ranked[:5]]
+    
+    log_fn(f"\n--- FÜZYON ÖZETİ ---")
+    log_fn(f"Keşif: {len(pool_list)} → Ön eleme: {len(passed_pre_screen)} → GA (5 nesil) → Rafinasyon: {len(refined_list)} → Final: {len(final_output)} aday")
+    return final_output, final_mode
 
 
 # ============================================================================
@@ -472,7 +568,7 @@ def main():
         description="Kural tabanlı yeni molekül üretimi (model eğitimi gerektirmez)"
     )
     parser.add_argument("--method", required=True,
-                        choices=["random", "brics", "genetic", "pretrained"])
+                        choices=["random", "brics", "genetic", "pretrained", "fusion"])
     parser.add_argument("--seeds", nargs="*", help="Tohum SMILES'ler (boşlukla ayrılmış)")
     parser.add_argument("--seeds-file", help="Tohumları içeren .smi dosyası")
     parser.add_argument("--n", type=int, default=50, help="Üretilecek molekül sayısı (random/brics)")
@@ -482,6 +578,9 @@ def main():
     parser.add_argument("--population", type=int, default=30)
     parser.add_argument("--elite-frac", type=float, default=0.20)
     parser.add_argument("--mutation-rate", type=float, default=0.30)
+    parser.add_argument("--refresh-every", type=int, default=3, help="Kaç nesilde bir tazelik enjeksiyonu yapılsın")
+    parser.add_argument("--adaptive-mutation", action="store_true", default=True, help="Adaptif mutasyonu aç")
+    parser.add_argument("--scaffold-diversity-threshold", type=float, default=0.3, help="Çeşitlilik sınırı")
     parser.add_argument("--seed", type=int, default=None, help="Rastgelelik tohumu (tekrarlanabilirlik)")
     # GA docking (opsiyonel — verilmezse yedek QED fitness kullanılır)
     parser.add_argument("--receptor", help="Reseptör PDBQT (GA gerçek docking için)")
@@ -508,7 +607,7 @@ def main():
         print(f"[OK] {len(mols)} yeni molekül üretildi (BRICS rekombinasyonu).")
         write_smi(mols, args.output)
 
-    elif args.method == "genetic":
+    elif args.method in ("genetic", "fusion"):
         docking_opts = None
         if args.receptor and args.center:
             docking_opts = {
@@ -519,14 +618,29 @@ def main():
             print(f"[INFO] Gerçek Vina docking ile skorlama: {args.receptor}")
         else:
             print("[INFO] Reseptör verilmedi → QED tabanlı yedek fitness kullanılacak.")
-        final = genetic_algorithm(
-            seeds, generations=args.generations, population_size=args.population,
-            elite_frac=args.elite_frac, mutation_rate=args.mutation_rate,
-            docking_opts=docking_opts,
-        )
+            
+        if args.method == "genetic":
+            final, mode = genetic_algorithm(
+                seeds, generations=args.generations, population_size=args.population,
+                elite_frac=args.elite_frac, mutation_rate=args.mutation_rate,
+                docking_opts=docking_opts,
+                refresh_every=args.refresh_every,
+                adaptive_mutation=args.adaptive_mutation,
+                scaffold_diversity_threshold=args.scaffold_diversity_threshold
+            )
+        else:
+            final, mode = fusion_generation(seeds, docking_opts=docking_opts)
+
+        if mode == "qed_fallback":
+            print("\n┌─────────────────────────────────────────────────────────────┐")
+            print("│ ⚠️  UYARI: Reseptör verilmedi. Skorlar GERÇEK DOCKING        │")
+            print("│     DEĞİL — sadece QED (ilaç-benzerlik) tahminidir.          │")
+            print("│     Gerçek affinity için --receptor ve --center belirt.      │")
+            print("└─────────────────────────────────────────────────────────────┘\n")
+
         mols = [s for s, _ in final]
         scores = {s: sc for s, sc in final}
-        print(f"[OK] GA tamamlandı, {len(mols)} molekül son popülasyonda.")
+        print(f"[OK] {args.method.upper()} tamamlandı, {len(mols)} molekül son popülasyonda.")
         write_smi(mols, args.output, scores=scores)
 
         # ----------------------------------------------------------------
@@ -541,10 +655,10 @@ def main():
             ga_scores_csv = Path(args.workdir) / "ga_final_scores.csv"
             ga_scores_csv.parent.mkdir(parents=True, exist_ok=True)
             with open(ga_scores_csv, "w", newline="") as _f:
-                _w = _csv.DictWriter(_f, fieldnames=["ligand", "affinity_kcal_mol"])
+                _w = _csv.DictWriter(_f, fieldnames=["ligand", "SMILES", "affinity_kcal_mol", "skor_kaynagi"])
                 _w.writeheader()
                 for i, (smi, sc) in enumerate(final):
-                    _w.writerow({"ligand": f"gen_{i:04d}", "affinity_kcal_mol": sc})
+                    _w.writerow({"ligand": f"gen_{i:04d}", "SMILES": smi, "affinity_kcal_mol": sc, "skor_kaynagi": mode})
 
             # validate_top_candidates fonksiyonunu import et
             try:
@@ -578,7 +692,7 @@ def main():
                         ilk_s = f"{ilk:.3f}" if isinstance(ilk, (int, float)) else str(ilk)
                         dog_s = f"{dog:.3f}" if isinstance(dog, (int, float)) else str(dog)
                         frk_s = f"{frk:.2f}" if isinstance(frk, (int, float)) else str(frk)
-                        sembol = {"GÜVENİLİR": "✓", "ŞÜPHELİ — tekrar kontrol et": "⚠", "ARTEFAKT OLASI — güvenme": "✗"}.get(dur, "?")
+                        sembol = {"GÜVENİLİR": "✓", "ŞÜPHELİ — tekrar kontrol et": "⚠", "ARTEFAKT OLASI — güvenme": "✗", "GÜÇLÜ ADAY — ilk tarama hafife almış": "⭐"}.get(dur, "?")
                         print(f"│ {vr['ligand']:<14} {ilk_s:>9} {dog_s:>10} {frk_s:>6} {sembol} {dur:<28} │")
                     print("└" + "─" * 76 + "┘")
                     print(f"[OK] Detaylı doğrulama raporu: {val_output}")
