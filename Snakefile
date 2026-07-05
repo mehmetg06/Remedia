@@ -11,6 +11,9 @@
 # Tek komutla çalıştır:
 #     snakemake --cores 1
 #
+# UI'dan run_id ile çalıştır (Bölüm C — izolasyon):
+#     snakemake --cores 1 --config ligands_file=data/generated.smi run_id=run_20260706_142031_a3f2
+#
 # Snakemake her rule'un input/output dosyalarını izler; sadece eksik ya da
 # girdisi değişmiş adımları yeniden çalıştırır (caching). Parametreler
 # config.yaml'dan okunur.
@@ -19,23 +22,28 @@
 configfile: "config.yaml"
 
 # --- config.yaml'dan türetilen yardımcı değerler ---------------------------
-UNIPROT   = config["uniprot_id"]
-CENTER    = config["pocket_center"]            # [x, y, z]
-BOX       = config["box_size"]                 # [sx, sy, sz]
-LIGANDS   = config["ligands_file"]
-EXHAUST   = config["exhaustiveness"]
+UNIPROT    = config["uniprot_id"]
+CENTER     = config["pocket_center"]            # [x, y, z]
+BOX        = config["box_size"]                 # [sx, sy, sz]
+LIGANDS    = config["ligands_file"]
+EXHAUST    = config["exhaustiveness"]
 ADMET_MODE = config["admet_mode"]
 
-# Ara/çıktı dosya yolları (tek yerde tanımlı ki rule'lar tutarlı kalsın)
+# --- run_id izolasyonu (Bölüm C) -------------------------------------------
+# run_id --config ile geçirilir; yoksa "default" klasörü kullanılır.
+RUN_ID     = config.get("run_id", "default")
+RUN_DIR    = f"results/{RUN_ID}"
+
+# Ara/çıktı dosya yolları
 RECEPTOR_PDB   = f"data/{UNIPROT}_alphafold.pdb"
 RECEPTOR_PDBQT = f"data/{UNIPROT}_alphafold.pdbqt"
 POCKET_INFO    = "data/pocket_info.txt"
-LIGANDS_DIR    = "data/ligands_prepared"
-DOCKING_CSV    = "results/docking_scores.csv"
-ADMET_CSV      = "results/admet_results.csv"
-RANKING_CSV    = "results/final_ranking.csv"
-DASHBOARD      = "dashboard.html"
-
+LIGANDS_DIR    = f"data/ligands_prepared_{RUN_ID}"
+DOCKING_CSV    = f"{RUN_DIR}/docking_scores.csv"
+ADMET_CSV      = f"{RUN_DIR}/admet_results.csv"
+RANKING_CSV    = f"{RUN_DIR}/final_ranking.csv"
+DASHBOARD      = f"{RUN_DIR}/dashboard.html"
+INPUT_COPY     = f"{RUN_DIR}/input_ligands.smi"
 
 # Molekül üretimi (opsiyonel giriş adımı) parametreleri
 GEN_METHOD  = config.get("gen_method", "brics")   # random | brics | genetic
@@ -54,7 +62,7 @@ rule all:
 #    Çıktısı doğrudan ligand_prep'e girebilen bir .smi dosyasıdır.
 #    Üretilen molekülleri pipeline'a sokmak için:
 #        snakemake --cores 1 generate
-#        snakemake --cores 1 --config ligands_file=data/generated.smi
+#        snakemake --cores 1 --config ligands_file=data/generated.smi run_id=<id>
 rule generate:
     input:
         GEN_SEEDS
@@ -63,6 +71,16 @@ rule generate:
     shell:
         "python src/molecule_generator.py --method {GEN_METHOD} "
         "--seeds-file {input} --n {GEN_N} --output {output}"
+
+
+# 0b) Ligand dosyasını run klasörüne kopyala (izolasyon için)
+rule copy_input_ligands:
+    input:
+        LIGANDS
+    output:
+        INPUT_COPY
+    shell:
+        "mkdir -p {RUN_DIR} && cp {input} {output}"
 
 
 # 1) Reseptör yapısını AlphaFold DB'den indir
@@ -115,6 +133,7 @@ rule docking:
     output:
         DOCKING_CSV
     shell:
+        "mkdir -p {RUN_DIR} && "
         "python src/docking.py "
         "--receptor {input.receptor} "
         "--ligands-dir {input.ligands} "
@@ -131,6 +150,7 @@ rule admet_filter:
     output:
         ADMET_CSV
     shell:
+        "mkdir -p {RUN_DIR} && "
         "python src/admet_filter.py "
         "--smiles-file {input} --mode {ADMET_MODE} --output {output}"
 
@@ -148,6 +168,7 @@ rule rank_report:
 
 
 # 7) Dashboard'ı güncel verilerle yeniden üret (son adım)
+#    run_id bilgisi de dashboard'a gömülür.
 rule dashboard:
     input:
         ranking=RANKING_CSV,
@@ -159,4 +180,5 @@ rule dashboard:
     shell:
         "python src/generate_dashboard.py "
         "--ranking {input.ranking} --admet {input.admet} "
-        "--config {input.config} --output {output}"
+        "--config {input.config} --output {output} "
+        "&& echo '{RUN_ID}' > results/latest_run.txt"
