@@ -32,6 +32,14 @@ exhaustiveness: 8
 # "lipinski" = hızlı offline RDKit kuralları, "admetlab" = ADMETlab 3.0 API.
 admet_mode: "lipinski"
 
+# --- Molekül üretimi (opsiyonel `generate` rule / molecule_generator.py) -----
+# Sıfırdan yeni aday molekül üretimi. Kural tabanlı, model eğitimi GEREKTİRMEZ.
+# "generate" rule'unu çalıştırdığında bu parametreler kullanılır:
+#     snakemake --cores 1 generate
+gen_method: "brics"                          # random | brics | genetic
+gen_seeds_file: "data/ligands_example.smi"   # tohum moleküller (.smi)
+gen_n: 50                                    # üretilecek molekül sayısı (random/brics)
+
 # ============================================================================
 # Dashboard görsel meta verileri
 # ----------------------------------------------------------------------------

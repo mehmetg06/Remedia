@@ -5,6 +5,7 @@ data/*_out/
 data/*_out/**
 data/ligands_prepared/
 data/pocket_info.txt
+data/generated.smi
 results/
 
 # Snakemake çalışma meta verileri

@@ -37,10 +37,32 @@ RANKING_CSV    = "results/final_ranking.csv"
 DASHBOARD      = "dashboard.html"
 
 
+# Molekül üretimi (opsiyonel giriş adımı) parametreleri
+GEN_METHOD  = config.get("gen_method", "brics")   # random | brics | genetic
+GEN_SEEDS   = config.get("gen_seeds_file", LIGANDS)
+GEN_N       = config.get("gen_n", 50)
+GEN_OUTPUT  = "data/generated.smi"
+
+
 # --- Varsayılan hedef: her şey hazır olsun ---------------------------------
 rule all:
     input:
         DASHBOARD
+
+
+# 0) (OPSİYONEL) Sıfırdan yeni molekül üret — kural tabanlı, model eğitimsiz.
+#    Çıktısı doğrudan ligand_prep'e girebilen bir .smi dosyasıdır.
+#    Üretilen molekülleri pipeline'a sokmak için:
+#        snakemake --cores 1 generate
+#        snakemake --cores 1 --config ligands_file=data/generated.smi
+rule generate:
+    input:
+        GEN_SEEDS
+    output:
+        GEN_OUTPUT
+    shell:
+        "python src/molecule_generator.py --method {GEN_METHOD} "
+        "--seeds-file {input} --n {GEN_N} --output {output}"
 
 
 # 1) Reseptör yapısını AlphaFold DB'den indir
