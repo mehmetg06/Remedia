@@ -1,0 +1,27 @@
+# Üretilmiş veri ve sonuçlar (her çalıştırmada değişir, repo'da tutulmaz)
+data/*.pdb
+data/*.pdbqt
+data/*_out/
+data/*_out/**
+data/ligands_prepared/
+results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Editör / geçici dosyalar
+.*.swp
+.*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Örnek girdi dosyalarını İSTİSNA tut (bunlar repo'da kalmalı)
+!data/ligands_example.smi
