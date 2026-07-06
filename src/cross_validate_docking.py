@@ -21,9 +21,9 @@ def dock_with_smina(receptor_pdbqt: Path, ligand_pdbqt: Path, center: list[float
         result = subprocess.run(smina_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             if result.returncode == 127 or "command not found" in result.stderr.lower():
-                print("Smina kurulu değil, kurulum: conda install -c conda-forge smina")
+                print("Smina kurulu değil. Terminalde şunu çalıştır: bash setup.sh")
             return None
-        
+
         for line in result.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 2 and parts[0] == "1":
@@ -32,7 +32,7 @@ def dock_with_smina(receptor_pdbqt: Path, ligand_pdbqt: Path, center: list[float
                 except ValueError:
                     pass
     except FileNotFoundError:
-        print("Smina kurulu değil, kurulum: conda install -c conda-forge smina")
+        print("Smina kurulu değil. Terminalde şunu çalıştır: bash setup.sh")
         return None
     return None
 

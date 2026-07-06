@@ -35,12 +35,20 @@ Tüm bunları tek bir web arayüzünden yönetmek için: **`streamlit run app.py
 
 ## Kurulum (GitHub Codespaces / Linux)
 
+Yeni bir Codespace açıldığında `setup.sh` **otomatik** çalışır (`.devcontainer/devcontainer.json`
+içindeki `postCreateCommand` sayesinde) ve gerekli tüm araçları (Python paketleri, openbabel,
+conda/Miniconda, fpocket, vina, smina) tek seferde kurar. İlk kurulum birkaç dakika sürebilir —
+özellikle Miniconda indirmesi yüzünden.
+
+Eski/mevcut bir Codespace'te bu otomasyon yoksa (ör. `.devcontainer` güncellenmeden önce açılmış
+bir ortam), elle çalıştırman yeterli:
+
 ```bash
-pip install -r requirements.txt   # snakemake, streamlit, rdkit dahil tüm bağımlılıklar
-# Vina binary (conda önerilir):
-conda install -c conda-forge vina
-# veya: pip install vina
+bash setup.sh
 ```
+
+Script idempotent'tir: zaten kurulu olan araçları atlar, zarar vermeden defalarca çalıştırılabilir.
+Sonunda hangi araçların kurulu olduğunu gösteren bir özet tablo (✓/✗) yazdırır.
 
 ## Hızlı Başlangıç — Web Arayüzü (UI)
 
