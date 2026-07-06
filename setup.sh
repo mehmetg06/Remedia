@@ -64,6 +64,20 @@ else
     apt_install openbabel || echo "  ⚠️  obabel apt ile kurulamadı; openbabel-wheel python paketi yeterli olabilir."
 fi
 
+# ── conda ToS onayı ───────────────────────────────────────────────────────────
+# Miniconda kurulduktan HEMEN SONRA, conda ile herhangi bir paket (fpocket/vina/
+# smina) kurulmaya çalışılmadan ÖNCE Anaconda kanallarının Kullanım Koşullarını
+# (Terms of Service) otomatik ve sessizce onayla. Aksi halde conda install şu
+# hatayla düşer:
+#   CondaToSNonInteractiveError: Terms of Service have not been accepted ...
+# Sadece conda varsa çalışır; idempotenttir (tekrar onaylamak zararsızdır).
+if command -v conda >/dev/null 2>&1; then
+    echo ""
+    echo "conda kanalları için Kullanım Koşulları (ToS) onaylanıyor..."
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main >/dev/null 2>&1 || true
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r >/dev/null 2>&1 || true
+fi
+
 # ── 3. AutoDock Vina (python paketi) ─────────────────────────────────────────
 # Uygulama Vina'yı `import vina` ile kontrol eder, komut satırı ikilisiyle değil.
 echo ""
