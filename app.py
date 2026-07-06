@@ -585,6 +585,12 @@ st.markdown(
 known_ligands: list[dict] = ss.get("known_ligands") or []
 known_msg: str = ss.get("known_ligands_msg", "")
 
+# Varsayılanlar: aşağıdaki dalların herhangi biri atlanırsa bile tanımlı kalsın
+# (örn. yapı henüz indirilmediyse Tohum kutusu yine de çalışmalı).
+FALLBACK_SEEDS = "CC(=O)Oc1ccccc1C(=O)O\nCC(C)Cc1ccc(cc1)C(C)C(=O)O"
+default_seeds = FALLBACK_SEEDS
+selected_smiles: list[str] = []
+
 # Eğer hiç çağrılmadıysa butona bas çıktısı yoktur; küçük not göster
 if ss["pdb_info"] is None:
     st.markdown(
@@ -635,12 +641,12 @@ elif known_ligands:
         unsafe_allow_html=True,
     )
 
-    default_seeds = "\n".join(selected_smiles) if selected_smiles else "CC(=O)Oc1ccccc1C(=O)O\nCC(C)Cc1ccc(cc1)C(C)C(=O)O"
+    default_seeds = "\n".join(selected_smiles) if selected_smiles else FALLBACK_SEEDS
 else:
     # Hiç bulunamadı
     if known_msg:
         st.info(known_msg)
-    default_seeds = "CC(=O)Oc1ccccc1C(=O)O\nCC(C)Cc1ccc(cc1)C(C)C(=O)O"
+    default_seeds = FALLBACK_SEEDS
     selected_smiles = []
 
 # ── Tohum kutusu (elle düzenlenebilir) ────────────────────────────────────────
