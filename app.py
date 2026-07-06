@@ -17,6 +17,7 @@ anlar. Hiçbir şey gizli/collapsed menüde değildir.
 5 adım: (1) Hedef seçimi → (2) Pocket seçimi → (3) Önerilen tohumlar + Üretim
          yöntemi → (4) Çalıştır → (5) Sonuçlar
 """
+import importlib.util
 import io
 import os
 import shutil
@@ -96,13 +97,18 @@ def _check_tool(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def _check_python_module(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
 @st.cache_data(ttl=60)
 def check_tools() -> dict[str, bool]:
     return {
         "snakemake": _check_tool("snakemake"),
-        "vina": _check_tool("vina") or _check_tool("autodock_vina"),
+        "vina": _check_python_module("vina"),
         "fpocket": _check_tool("fpocket"),
         "obabel": _check_tool("obabel"),
+        "smina": _check_tool("smina"),
     }
 
 
@@ -228,14 +234,14 @@ def mol_to_png_bytes(smi: str, size=(200, 160)) -> bytes | None:
 def _interpret_snakemake_error(stderr: str, stdout: str) -> str:
     """Ham Snakemake hata çıktısını sade Türkçe'ye çevirir."""
     combined = (stderr + stdout).lower()
-    if "vina" in combined and ("not found" in combined or "command not found" in combined):
-        return "🔴 Docking adımında hata: AutoDock Vina kurulu değil. `conda install -c conda-forge autodock-vina` komutuyla kurabilirsin."
+    if "vina" in combined and ("not found" in combined or "command not found" in combined or "no module named" in combined):
+        return "🔴 Docking adımında hata: AutoDock Vina kurulu değil. Terminalde şunu çalıştır: `bash setup.sh`"
     if "obabel" in combined and "not found" in combined:
-        return "🔴 Ligand hazırlama adımında hata: Open Babel (obabel) kurulu değil. `apt install openbabel` ile kurabilirsin."
+        return "🔴 Ligand hazırlama adımında hata: Open Babel (obabel) kurulu değil. Terminalde şunu çalıştır: `bash setup.sh`"
     if "fpocket" in combined and "not found" in combined:
-        return "🔴 Pocket tespitinde hata: fpocket kurulu değil. https://github.com/Discngine/fpocket adresinden kurabilirsin."
+        return "🔴 Pocket tespitinde hata: fpocket kurulu değil. Terminalde şunu çalıştır: `bash setup.sh`"
     if "modulenotfounderror" in combined or "importerror" in combined:
-        return "🔴 Python modülü eksik. `pip install -r requirements.txt` komutunu çalıştır."
+        return "🔴 Python modülü eksik. Terminalde şunu çalıştır: `bash setup.sh`"
     if "missinginputexception" in combined or "missing input" in combined:
         return "🔴 Girdi dosyası eksik. Adım 1'de yapıyı indirip Adım 4'te molekülleri kaydettiğinden emin ol."
     if "workflowerror" in combined:
@@ -319,20 +325,26 @@ st.markdown(
 # ── Araç Durumu ──────────────────────────────────────────────────────────────
 with st.expander("🔧 Araç Kurulum Durumu", expanded=False):
     tools = check_tools()
-    cols = st.columns(4)
-    labels = {"snakemake": "Snakemake", "vina": "AutoDock Vina", "fpocket": "fpocket", "obabel": "Open Babel"}
-    install_hints = {
-        "snakemake": "pip install snakemake --break-system-packages",
-        "vina": "conda install -c conda-forge autodock-vina",
-        "fpocket": "https://github.com/Discngine/fpocket",
-        "obabel": "apt install openbabel",
+    cols = st.columns(len(tools))
+    labels = {
+        "snakemake": "Snakemake",
+        "vina": "AutoDock Vina",
+        "fpocket": "fpocket",
+        "obabel": "Open Babel",
+        "smina": "smina (opsiyonel)",
     }
     for (k, v), col in zip(tools.items(), cols):
         icon = "✅" if v else "❌"
         css = "status-ok" if v else "status-err"
         col.markdown(
             f"<span class='{css}'>{icon} {labels[k]}</span>"
-            + (f"<br><span style='font-size:0.72rem;color:#7E8C9A'>{install_hints[k]}</span>" if not v else ""),
+            + ("<br><span style='font-size:0.72rem;color:#7E8C9A'>Terminalde: <code>bash setup.sh</code></span>" if not v else ""),
+            unsafe_allow_html=True,
+        )
+    if not all(tools.values()):
+        st.markdown(
+            "<div class='plain' style='margin-top:6px'>Eksik araçları tek seferde kurmak için "
+            "terminalde <code>bash setup.sh</code> çalıştır (idempotent'tir, defalarca çalıştırılabilir).</div>",
             unsafe_allow_html=True,
         )
 
@@ -854,8 +866,8 @@ with col_run:
         st.warning("⏳ Pipeline zaten çalışıyor... Lütfen bekle.")
     elif not tools.get("snakemake", False):
         st.error(
-            "❌ Snakemake kurulu değil. Kurulum için:\n"
-            "`pip install snakemake --break-system-packages`"
+            "❌ Snakemake kurulu değil. Terminalde şunu çalıştır:\n"
+            "`bash setup.sh`"
         )
     else:
         btn_label = "🚀 Pipeline'ı Çalıştır (Snakemake)"
