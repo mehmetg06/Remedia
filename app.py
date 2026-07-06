@@ -549,7 +549,7 @@ pocket_df = pd.DataFrame(pocket_rows)
 
 st.dataframe(
     pocket_df,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         col: st.column_config.Column(help=POCKET_HELP.get(col, ""))
@@ -585,6 +585,12 @@ st.markdown(
 known_ligands: list[dict] = ss.get("known_ligands") or []
 known_msg: str = ss.get("known_ligands_msg", "")
 
+# Varsayılanlar: aşağıdaki dalların herhangi biri atlanırsa bile tanımlı kalsın
+# (örn. yapı henüz indirilmediyse Tohum kutusu yine de çalışmalı).
+FALLBACK_SEEDS = "CC(=O)Oc1ccccc1C(=O)O\nCC(C)Cc1ccc(cc1)C(C)C(=O)O"
+default_seeds = FALLBACK_SEEDS
+selected_smiles: list[str] = []
+
 # Eğer hiç çağrılmadıysa butona bas çıktısı yoktur; küçük not göster
 if ss["pdb_info"] is None:
     st.markdown(
@@ -607,7 +613,7 @@ elif known_ligands:
             # 2D çizim
             png = mol_to_png_bytes(lig["smiles"], size=(200, 150))
             if png:
-                st.image(png, use_container_width=True)
+                st.image(png, width="stretch")
             # Bilgi
             st.markdown(
                 f"<b style='font-size:0.9rem'>{lig['name']}</b><br>"
@@ -635,12 +641,12 @@ elif known_ligands:
         unsafe_allow_html=True,
     )
 
-    default_seeds = "\n".join(selected_smiles) if selected_smiles else "CC(=O)Oc1ccccc1C(=O)O\nCC(C)Cc1ccc(cc1)C(C)C(=O)O"
+    default_seeds = "\n".join(selected_smiles) if selected_smiles else FALLBACK_SEEDS
 else:
     # Hiç bulunamadı
     if known_msg:
         st.info(known_msg)
-    default_seeds = "CC(=O)Oc1ccccc1C(=O)O\nCC(C)Cc1ccc(cc1)C(C)C(=O)O"
+    default_seeds = FALLBACK_SEEDS
     selected_smiles = []
 
 # ── Tohum kutusu (elle düzenlenebilir) ────────────────────────────────────────
@@ -1015,7 +1021,7 @@ else:
         if docking_csv.exists():
             st.markdown("**📊 Docking Skorları**")
             _ddf = pd.read_csv(docking_csv)
-            st.dataframe(_ddf, use_container_width=True, hide_index=True)
+            st.dataframe(_ddf, width="stretch", hide_index=True)
             st.download_button("⬇️ İndir", data=_ddf.to_csv(index=False).encode(),
                                file_name=f"{selected_run}_docking.csv", mime="text/csv")
         else:
@@ -1025,7 +1031,7 @@ else:
         if admet_csv.exists():
             st.markdown("**🧪 ADMET Filtresi**")
             _adf = pd.read_csv(admet_csv)
-            st.dataframe(_adf, use_container_width=True, hide_index=True)
+            st.dataframe(_adf, width="stretch", hide_index=True)
             st.download_button("⬇️ İndir", data=_adf.to_csv(index=False).encode(),
                                file_name=f"{selected_run}_admet.csv", mime="text/csv")
         else:
@@ -1035,7 +1041,7 @@ else:
         if ranking_csv.exists():
             st.markdown("**🏆 Final Sıralama**")
             _rdf = pd.read_csv(ranking_csv)
-            st.dataframe(_rdf, use_container_width=True, hide_index=True)
+            st.dataframe(_rdf, width="stretch", hide_index=True)
             st.download_button("⬇️ İndir", data=_rdf.to_csv(index=False).encode(),
                                file_name=f"{selected_run}_ranking.csv", mime="text/csv")
         else:
