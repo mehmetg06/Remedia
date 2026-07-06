@@ -44,6 +44,47 @@ if str(_SRC_DIR) not in sys.path:
 GUVEN_GUVENILIR = "GÜVENİLİR"
 GUVEN_SUPHE = "ŞÜPHELİ — tekrar kontrol et"
 GUVEN_ARTEFAKT = "ARTEFAKT OLASI — güvenme"
+GUVEN_BASARISIZ = "DOĞRULANAMADI"  # başarısız satırların guven_durumu; gerçek sebep 'sebep' sütununda
+
+# Çıktı CSV'sinin sütunları. 'sebep' sütunu, doğrulama başarısız olduğunda
+# GERÇEK hatayı (ör. "ligand dosyası bulunamadı: .../gen_0003.pdbqt") taşır ki
+# UI genel/anlamsız bir mesaj yerine gerçeği gösterebilsin.
+FIELDNAMES = ["ligand", "ilk_skor", "dogrulanmis_skor", "fark", "yon", "guven_durumu", "sebep"]
+
+
+def _write_csv(output_csv: Path, rows: list[dict]) -> None:
+    """Karşılaştırma satırlarını CSV'ye yazar (eksik alanları boş bırakır)."""
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, "") for k in FIELDNAMES})
+
+
+def write_failure_csv(output_csv: Path, ligands: list, sebep: str) -> None:
+    """Doğrulama hiç yapılamadığında bile BAŞARISIZ durumlu bir CSV yazar —
+    dosya HER ZAMAN oluşsun, kullanıcı 'neden yok' diye şaşırmasın.
+
+    Args:
+        ligands: [(ligand_adı, ilk_skor), ...] — boşsa tek bir açıklama satırı yazılır.
+        sebep:   Başarısızlığın gerçek sebebi.
+    """
+    rows = []
+    if ligands:
+        for name, ilk in ligands:
+            rows.append({
+                "ligand": name,
+                "ilk_skor": ilk if isinstance(ilk, (int, float)) else "",
+                "dogrulanmis_skor": "", "fark": "", "yon": "",
+                "guven_durumu": GUVEN_BASARISIZ, "sebep": sebep,
+            })
+    else:
+        rows.append({
+            "ligand": "(yok)", "ilk_skor": "", "dogrulanmis_skor": "",
+            "fark": "", "yon": "", "guven_durumu": GUVEN_BASARISIZ, "sebep": sebep,
+        })
+    _write_csv(output_csv, rows)
 
 
 def guven_durumu(ilk_skor: float, dogrulanmis_skor: float) -> tuple[str, str]:
@@ -100,19 +141,30 @@ def load_scores(csv_path: Path) -> list[dict]:
 def find_ligand_pdbqt(ligand_name: str, search_dirs: list[Path]) -> Path | None:
     """
     Verilen ligand adını içeren .pdbqt dosyasını arama dizinlerinde arar.
-    '_docked' son ekli dosyaları tercih eder, yoksa normal dosyayı döndürür.
+    Önce ham hazırlanmış dosyayı (yeniden docking için doğru girdi), yoksa
+    '_docked' son ekli dosyayı döndürür.
     """
-    # Önce _docked versiyonunu ara
-    for d in search_dirs:
-        p = d / f"{ligand_name}_docked.pdbqt"
-        if p.exists():
-            return p
-    # Sonra ham versiyonu ara
+    # Önce ham (hazırlanmış) versiyonu ara — yeniden docking'in doğru girdisi.
     for d in search_dirs:
         p = d / f"{ligand_name}.pdbqt"
         if p.exists():
             return p
+    # Sonra docklanmış pozu ara (son çare).
+    for d in search_dirs:
+        p = d / f"{ligand_name}_docked.pdbqt"
+        if p.exists():
+            return p
     return None
+
+
+def _search_paths_hint(ligand_name: str, search_dirs: list[Path]) -> str:
+    """Bir ligand bulunamadığında, GERÇEKTEN nerelere bakıldığını gösteren okunur
+    bir sebep metni üretir — kullanıcı/geliştirici yolu kendi kontrol edebilsin."""
+    if not search_dirs:
+        return (f"ligand dosyası bulunamadı: {ligand_name}.pdbqt — hiçbir arama "
+                f"dizini mevcut değil (ligand hazırlama adımı hiç çalışmamış olabilir)")
+    tried = ", ".join(str(d / f"{ligand_name}.pdbqt") for d in search_dirs)
+    return f"ligand dosyası bulunamadı: {ligand_name}.pdbqt — bakılan yollar: {tried}"
 
 
 # ============================================================================
@@ -125,19 +177,20 @@ def redock_ligand(
     box_size: list[float],
     exhaustiveness: int,
     poses_dir: Path,
-) -> float | None:
+) -> tuple[float | None, str | None]:
     """
     Tek bir ligand'ı yüksek exhaustiveness ile yeniden docklar.
     docking.py'yi fonksiyon olarak import eder — CLI bozulmaz.
 
     Returns:
-        En iyi affinity skoru (kcal/mol) ya da hata durumunda None.
+        (skor, hata):
+            başarı → (affinity_kcal_mol, None)
+            hata   → (None, "gerçek hata sebebi"), örn. import/Vina/boş sonuç.
     """
     try:
         import docking  # src/docking.py
-    except ImportError as e:
-        print(f"  [UYARI] docking.py import edilemedi: {e}")
-        return None
+    except Exception as e:
+        return None, f"docking.py import edilemedi: {type(e).__name__}: {e}"
 
     # docking.dock_all tek bir ligand için de çalışır:
     # ligand_pdbqt'yi geçici bir dizinde hazır halde bekletiyoruz.
@@ -147,7 +200,10 @@ def redock_ligand(
         import shutil
 
         dest = tmp_path / ligand_pdbqt.name
-        shutil.copy2(ligand_pdbqt, dest)
+        try:
+            shutil.copy2(ligand_pdbqt, dest)
+        except Exception as e:
+            return None, f"ligand kopyalanamadı ({ligand_pdbqt}): {type(e).__name__}: {e}"
 
         try:
             results = docking.dock_all(
@@ -159,12 +215,14 @@ def redock_ligand(
                 exhaustiveness=exhaustiveness,
             )
         except Exception as e:
-            print(f"  [UYARI] Vina çalışmadı: {e}")
-            return None
+            return None, f"Vina çalışmadı: {type(e).__name__}: {e}"
 
-    if results:
-        return results[0]["affinity_kcal_mol"]
-    return None
+    if not results:
+        return None, "Vina hiç sonuç döndürmedi (ligand dosyası boş/geçersiz olabilir)"
+    aff = results[0].get("affinity_kcal_mol")
+    if aff is None:
+        return None, "Vina bu ligand için skor üretemedi (docking başarısız)"
+    return aff, None
 
 
 # ============================================================================
@@ -179,6 +237,7 @@ def validate_top_candidates(
     exhaustiveness: int = 32,
     ligand_dirs: list[Path] | None = None,
     output_csv: Path = Path("results/validated_candidates.csv"),
+    prep_errors: dict | None = None,
 ) -> list[dict]:
     """
     En iyi N molekülü yüksek exhaustiveness ile yeniden docklar ve karşılaştırma
@@ -193,10 +252,15 @@ def validate_top_candidates(
         exhaustiveness:  Yeniden docking için kullanılacak exhaustiveness.
         ligand_dirs:     Hazır .pdbqt dosyalarının aranacağı dizinler.
         output_csv:      Karşılaştırma tablosunun yazılacağı yol.
+        prep_errors:     {ligand_adı: hazırlama_hata_sebebi} — bir ligand'ın PDBQT'si
+                         bulunamazsa, hazırlama adımının gerçek sebebini raporlamak için.
 
     Returns:
-        Karşılaştırma satırlarının listesi (dict).
+        Karşılaştırma satırlarının listesi (dict). NOT: Bu fonksiyon HER durumda
+        output_csv'yi yazar (başarısızlıkta bile BAŞARISIZ satırlarıyla).
     """
+    prep_errors = prep_errors or {}
+
     # --- Varsayılan arama dizinleri ---
     if ligand_dirs is None:
         ligand_dirs = [
@@ -213,7 +277,11 @@ def validate_top_candidates(
     # --- Skorları yükle ve ilk N tanesini seç ---
     all_scores = load_scores(scores_csv)
     if not all_scores:
-        print(f"[HATA] {scores_csv} dosyasında geçerli skor bulunamadı.")
+        sebep = f"{scores_csv} dosyasında geçerli skor bulunamadı"
+        print(f"[HATA] {sebep}.")
+        # Dosya yine de oluşsun — kullanıcı 'neden yok' diye şaşırmasın.
+        write_failure_csv(output_csv, [], sebep=sebep)
+        print(f"[OK] Boş/başarısız doğrulama raporu yazıldı: {output_csv}")
         return []
 
     # En iyi (en negatif affinity) N molekülü seç
@@ -239,19 +307,22 @@ def validate_top_candidates(
         # Ligand PDBQT'yi bul
         lig_pdbqt = find_ligand_pdbqt(ligand_name, ligand_dirs)
         if lig_pdbqt is None:
-            print(f"  [UYARI] {ligand_name}: PDBQT dosyası bulunamadı — atlanıyor.")
+            # GERÇEK sebep: önce hazırlama adımının hatası, yoksa bakılan yollar.
+            sebep = prep_errors.get(ligand_name) or _search_paths_hint(ligand_name, ligand_dirs)
+            print(f"  [UYARI] {ligand_name}: {sebep}")
             comparison_rows.append({
                 "ligand": ligand_name,
-                "ilk_skor": ilk_skor,
+                "ilk_skor": round(ilk_skor, 4),
                 "dogrulanmis_skor": "",
                 "fark": "",
                 "yon": "",
-                "guven_durumu": "DOĞRULANAMADI — PDBQT bulunamadı",
+                "guven_durumu": GUVEN_BASARISIZ,
+                "sebep": sebep,
             })
             continue
 
         print(f"  ↻  {ligand_name}: {ilk_skor:.3f} → yeniden docklama...", end=" ", flush=True)
-        dogrulanmis_skor = redock_ligand(
+        dogrulanmis_skor, redock_err = redock_ligand(
             ligand_pdbqt=lig_pdbqt,
             receptor_pdbqt=receptor_pdbqt,
             center=center,
@@ -261,14 +332,17 @@ def validate_top_candidates(
         )
 
         if dogrulanmis_skor is None:
-            print("BAŞARISIZ")
+            # Gerçek hatayı sakla — genel "Vina hatası" yerine sebebi göster.
+            sebep = f"{redock_err} (ligand: {lig_pdbqt})"
+            print(f"BAŞARISIZ — {redock_err}")
             comparison_rows.append({
                 "ligand": ligand_name,
-                "ilk_skor": ilk_skor,
+                "ilk_skor": round(ilk_skor, 4),
                 "dogrulanmis_skor": "",
                 "fark": "",
                 "yon": "",
-                "guven_durumu": "DOĞRULANAMADI — Vina hatası",
+                "guven_durumu": GUVEN_BASARISIZ,
+                "sebep": sebep,
             })
             continue
 
@@ -286,17 +360,13 @@ def validate_top_candidates(
             "fark": round(fark_val, 4),
             "yon": yon,
             "guven_durumu": durum,
+            "sebep": "",
         })
 
     print(f"{'='*60}\n")
 
-    # --- Çıktıyı kaydet ---
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_csv, "w", newline="") as f:
-        fieldnames = ["ligand", "ilk_skor", "dogrulanmis_skor", "fark", "yon", "guven_durumu"]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(comparison_rows)
+    # --- Çıktıyı kaydet (HER durumda) ---
+    _write_csv(output_csv, comparison_rows)
 
     print(f"[OK] Doğrulama sonuçları kaydedildi: {output_csv}")
 

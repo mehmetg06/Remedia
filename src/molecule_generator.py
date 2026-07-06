@@ -50,6 +50,80 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 # kendimiz eleyeceğiz, log'u kirletmesinler.
 RDLogger.DisableLog("rdApp.*")
 
+
+# ============================================================================
+# ÇALIŞTIRMAYA (RUN) ÖZGÜ LİGAND YOLLARI — TEK KAYNAK
+# ============================================================================
+# Bir GA/füzyon çalıştırmasının ürettiği tüm ligand dosyalarının yolları
+# BURADAN üretilir. Hem docking (ligand hazırlama), hem de otomatik doğrulama
+# adımı yolları BU fonksiyondan alır. Böylece yol iki ayrı yerde elle
+# birleştirilmez ve gelecekte "hazırlanan klasör" ile "doğrulamanın baktığı
+# klasör" birbirinden sapamaz (senkronizasyon bozulmasını kökten önler).
+def ligand_workspace(workdir) -> dict:
+    """Verilen çalıştırma iş dizini (workdir) için ligand alt-klasörlerini döndürür.
+
+    Returns:
+        {
+          "prepared":   docking için hazırlanan ham .pdbqt'ler (gen_XXXX.pdbqt),
+          "poses":      docklanmış pozlar (gen_XXXX_docked.pdbqt),
+          "validation": doğrulama için, ga_final_scores.csv ile AYNI adlarla
+                        yeniden hazırlanan .pdbqt'ler,
+        }
+    """
+    workdir = Path(workdir)
+    return {
+        "prepared": workdir / "prepared",
+        "poses": workdir / "poses",
+        "validation": workdir / "validation_prepared",
+    }
+
+
+def prepare_validation_ligands(final: list, workdir) -> tuple:
+    """Doğrulanacak final adayları, ga_final_scores.csv'deki gen_XXXX adlarıyla
+    BİREBİR aynı adları kullanarak ayrı bir doğrulama klasörüne yeniden hazırlar.
+
+    Neden gerekli:
+        GA/füzyon her nesilde `prepared/` klasörüne gen_0000, gen_0001... adıyla
+        yazar ve bu adlar nesil-içi indeks olduğu için nesiller arasında ÜZERİNE
+        yazılır. `ga_final_scores.csv` ise adları FINAL popülasyonun sırasına göre
+        verir. Dolayısıyla diskteki gen_0003.pdbqt ile CSV'deki gen_0003 satırı
+        FARKLI moleküller olabilir → doğrulama yanlış molekülü docklar veya dosyayı
+        bulamaz. Bu fonksiyon final adayları kendi SMILES'lerinden, CSV ile aynı
+        indekste yeniden hazırlayarak ad↔dosya eşleşmesini GARANTİ eder.
+
+    Returns:
+        (validation_dir, errors)  — errors: {gen_adı: hata_sebebi} (boşsa hepsi OK)
+    """
+    ws = ligand_workspace(workdir)
+    val_dir = ws["validation"]
+    val_dir.mkdir(parents=True, exist_ok=True)
+
+    import sys
+    src_dir = Path(__file__).resolve().parent
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    try:
+        import ligand_prep
+    except Exception as e:
+        # Tüm adaylar için tek ortak sebep — modül yüklenemedi.
+        return val_dir, {f"gen_{i:04d}": f"ligand_prep import edilemedi: {e}"
+                         for i in range(len(final))}
+
+    errors = {}
+    for i, (smi, _sc) in enumerate(final):
+        name = f"gen_{i:04d}"
+        try:
+            sdf = ligand_prep.prepare_ligand(smi, name, val_dir)
+            if sdf is None:
+                errors[name] = f"3D hazırlama başarısız (geçersiz/gömülemeyen SMILES): {smi}"
+                continue
+            pdbqt = ligand_prep.convert_to_pdbqt(sdf)
+            if pdbqt is None:
+                errors[name] = "PDBQT dönüşümü başarısız (meeko kurulu mu?)"
+        except Exception as e:
+            errors[name] = f"{type(e).__name__}: {e}"
+    return val_dir, errors
+
 # --- Mutasyon "yapı taşları" -------------------------------------------------
 # Atom değişimi için kullanılacak elementler (organik kimyada yaygın, valansı
 # uyumlu heteroatomlar): C, N, O, S
@@ -370,9 +444,10 @@ def _dock_smiles(smiles_list, receptor, center, box_size, workdir, exhaustivenes
                 tick_cb()
         return {smi: _pseudo_affinity(smi) for smi in smiles_list}, "qed_fallback"
 
-    workdir = Path(workdir)
-    prepared = workdir / "prepared"
-    poses = workdir / "poses"
+    # Yollar TEK KAYNAKTAN (ligand_workspace) — doğrulama adımıyla aynı klasörler.
+    ws = ligand_workspace(workdir)
+    prepared = ws["prepared"]
+    poses = ws["poses"]
     prepared.mkdir(parents=True, exist_ok=True)
     poses.mkdir(parents=True, exist_ok=True)
 
@@ -746,10 +821,13 @@ class _ProgressWriter:
         self.state.update(st)
         self._flush()
 
-    def finish(self, results, mode):
+    def finish(self, results, mode, validation=None):
         self.state["status"] = "done"
         self.state["mode"] = mode
         self.state["results"] = [[s, sc] for s, sc in results]
+        if validation is not None:
+            # Doğrulama özeti/hatası — UI 'done' aşamasında bunu gösterir.
+            self.state["validation"] = validation
         self._flush(force=True)
 
     def error(self, msg):
@@ -771,6 +849,98 @@ class _ProgressWriter:
             tmp.replace(self.path)
         except Exception:
             pass
+
+
+def _run_auto_validation(args, final: list, mode: str) -> str:
+    """GA/füzyon bittiğinde en iyi adayları yüksek exhaustiveness ile yeniden
+    docklayarak doğrular. Ligand yollarını `ligand_workspace`'ten (TEK KAYNAK)
+    alır ve final adayları CSV ile aynı adlarla yeniden hazırlar (ad↔dosya
+    eşleşmesi garanti). UI'da gösterilecek kısa bir özet metni döndürür.
+
+    Bu fonksiyon HİÇBİR koşulda exception fırlatmaz — her durumda anlamlı bir
+    özet döndürür, çünkü çağıran taraf (füzyon) bunu progress.json'a yazar.
+    """
+    import csv as _csv
+    import traceback as _tb
+
+    ws = ligand_workspace(args.workdir)
+
+    try:
+        # 1) GA skorlarını validate_top_candidates'in beklediği formata yaz.
+        ga_scores_csv = Path(args.workdir) / "ga_final_scores.csv"
+        ga_scores_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(ga_scores_csv, "w", newline="") as _f:
+            _w = _csv.DictWriter(_f, fieldnames=["ligand", "SMILES", "affinity_kcal_mol", "skor_kaynagi"])
+            _w.writeheader()
+            for i, (smi, sc) in enumerate(final):
+                _w.writerow({"ligand": f"gen_{i:04d}", "SMILES": smi,
+                             "affinity_kcal_mol": sc, "skor_kaynagi": mode})
+
+        # 2) Final adayları CSV ile AYNI adlarla yeniden hazırla (ad↔dosya eşleşmesi).
+        val_dir, prep_errors = prepare_validation_ligands(final, args.workdir)
+
+        # 3) Doğrulamayı çalıştır. Ligand dizinleri TEK KAYNAKTAN gelir; önce
+        #    ada birebir uyan validation klasörü, sonra ham prepared/poses.
+        import validate_top_candidates as _vtc
+        val_exhaustiveness = args.exhaustiveness * 4  # ör. 8 → 32
+        val_output = Path("results/validated_candidates.csv")
+        print(f"\n[DOĞRULAMA] En iyi 5 aday exhaustiveness={val_exhaustiveness} ile yeniden docklaniyor...")
+        val_rows = _vtc.validate_top_candidates(
+            scores_csv=ga_scores_csv,
+            receptor_pdbqt=Path(args.receptor),
+            center=list(args.center),
+            box_size=list(args.size),
+            top_n=5,
+            exhaustiveness=val_exhaustiveness,
+            ligand_dirs=[val_dir, ws["prepared"], ws["poses"]],
+            output_csv=val_output,
+            prep_errors=prep_errors,
+        )
+    except Exception as _ve:
+        # Beklenmedik hata — özeti üret, gene de bir CSV yazmayı dene.
+        err = f"{type(_ve).__name__}: {_ve}"
+        print(f"[UYARI] Otomatik doğrulama çalışmadı: {err}")
+        print(_tb.format_exc())
+        try:
+            _vtc = __import__("validate_top_candidates")
+            _vtc.write_failure_csv(
+                Path("results/validated_candidates.csv"),
+                [(f"gen_{i:04d}", sc) for i, (smi, sc) in enumerate(final[:5])],
+                sebep=err,
+            )
+        except Exception:
+            pass
+        return f"⚠️ Doğrulama çalışmadı — sebep: {err}"
+
+    # 4) Konsol özeti + UI özet metni üret.
+    if not val_rows:
+        return "⚠️ Doğrulama: skorlanacak aday bulunamadı (validated_candidates.csv yine de yazıldı)."
+
+    ok = sum(1 for vr in val_rows if str(vr.get("guven_durumu", "")).startswith(("GÜVENİLİR", "GÜÇLÜ", "ŞÜPHELİ", "ARTEFAKT")))
+    fail = [vr for vr in val_rows if str(vr.get("guven_durumu", "")).startswith("DOĞRULANAMADI")]
+
+    print("\n┌─ DOĞRULAMA ÖZETİ ─────────────────────────────────────────┐")
+    print(f"│ {'Ligand':<14} {'İlk Skor':>9} {'Doğrulama':>10} {'Fark':>6} {'Durum':<30} │")
+    print("│ " + "─" * 74 + " │")
+    for vr in val_rows:
+        ilk = vr.get('ilk_skor', '')
+        dog = vr.get('dogrulanmis_skor', '')
+        frk = vr.get('fark', '')
+        dur = vr.get('guven_durumu', '')
+        ilk_s = f"{ilk:.3f}" if isinstance(ilk, (int, float)) else str(ilk)
+        dog_s = f"{dog:.3f}" if isinstance(dog, (int, float)) else str(dog)
+        frk_s = f"{frk:.2f}" if isinstance(frk, (int, float)) else str(frk)
+        sembol = {"GÜVENİLİR": "✓", "ŞÜPHELİ — tekrar kontrol et": "⚠", "ARTEFAKT OLASI — güvenme": "✗", "GÜÇLÜ ADAY — ilk tarama hafife almış": "⭐"}.get(dur, "?")
+        print(f"│ {vr['ligand']:<14} {ilk_s:>9} {dog_s:>10} {frk_s:>6} {sembol} {dur:<28} │")
+    print("└" + "─" * 76 + "┘")
+    print("[OK] Detaylı doğrulama raporu: results/validated_candidates.csv")
+
+    if fail:
+        # İlk başarısızlığın GERÇEK sebebini özete taşı — sessizce yutma.
+        ilk_sebep = str(fail[0].get("sebep", "") or fail[0].get("guven_durumu", "")).strip()
+        return (f"⚠️ Doğrulama: {ok}/{len(val_rows)} aday doğrulandı, "
+                f"{len(fail)} başarısız — sebep: {ilk_sebep}")
+    return f"✅ Doğrulama tamamlandı: {ok}/{len(val_rows)} aday doğrulandı."
 
 
 def main():
@@ -831,6 +1001,7 @@ def main():
         write_smi(mols, args.output)
 
     elif args.method in ("genetic", "fusion"):
+        writer = None  # füzyon ilerleme yazıcısı (varsa) — doğrulamadan SONRA finish edilir
         docking_opts = None
         if args.receptor and args.center:
             docking_opts = {
@@ -868,8 +1039,9 @@ def main():
                     n_jobs=args.n_jobs,
                     progress_fn=fusion_progress,
                 )
-                if writer:
-                    writer.finish(final, mode)
+                # NOT: writer.finish() burada DEĞİL — doğrulama adımından SONRA
+                # çağrılır ki doğrulama özeti/hatası da progress.json'a yazılıp
+                # UI'da gösterilebilsin (aksi halde UI 'done' görüp okumayı bırakır).
             except Exception as e:
                 if writer:
                     writer.error(e)
@@ -891,58 +1063,14 @@ def main():
         # OTOMATİK DOĞRULAMA: GA bittiğinde en iyi N adayı yüksek
         # exhaustiveness ile yeniden dockla — artefakt skorları tespit et.
         # ----------------------------------------------------------------
+        validation_summary = None
         if args.receptor and args.center:
-            import csv as _csv
-            import tempfile as _tempfile
+            validation_summary = _run_auto_validation(args, final, mode)
 
-            # GA skorlarını geçici bir CSV'ye yaz (validate_top_candidates'in beklediği format)
-            ga_scores_csv = Path(args.workdir) / "ga_final_scores.csv"
-            ga_scores_csv.parent.mkdir(parents=True, exist_ok=True)
-            with open(ga_scores_csv, "w", newline="") as _f:
-                _w = _csv.DictWriter(_f, fieldnames=["ligand", "SMILES", "affinity_kcal_mol", "skor_kaynagi"])
-                _w.writeheader()
-                for i, (smi, sc) in enumerate(final):
-                    _w.writerow({"ligand": f"gen_{i:04d}", "SMILES": smi, "affinity_kcal_mol": sc, "skor_kaynagi": mode})
-
-            # validate_top_candidates fonksiyonunu import et
-            try:
-                import validate_top_candidates as _vtc
-                val_exhaustiveness = args.exhaustiveness * 4  # ör. 8 → 32
-                val_output = Path("results/validated_candidates.csv")
-                print(f"\n[DOĞRULAMA] En iyi {5} aday exhaustiveness={val_exhaustiveness} ile yeniden docklaniyor...")
-                val_rows = _vtc.validate_top_candidates(
-                    scores_csv=ga_scores_csv,
-                    receptor_pdbqt=Path(args.receptor),
-                    center=list(args.center),
-                    box_size=list(args.size),
-                    top_n=5,
-                    exhaustiveness=val_exhaustiveness,
-                    ligand_dirs=[
-                        Path(args.workdir) / "prepared",
-                        Path(args.workdir) / "poses",
-                    ],
-                    output_csv=val_output,
-                )
-                # Özet tabloyu konsola yazdır
-                if val_rows:
-                    print("\n┌─ DOĞRULAMA ÖZETİ ─────────────────────────────────────────┐")
-                    print(f"│ {'Ligand':<14} {'İlk Skor':>9} {'Doğrulama':>10} {'Fark':>6} {'Durum':<30} │")
-                    print("│ " + "─" * 74 + " │")
-                    for vr in val_rows:
-                        ilk = vr.get('ilk_skor', '')
-                        dog = vr.get('dogrulanmis_skor', '')
-                        frk = vr.get('fark', '')
-                        dur = vr.get('guven_durumu', '')
-                        ilk_s = f"{ilk:.3f}" if isinstance(ilk, (int, float)) else str(ilk)
-                        dog_s = f"{dog:.3f}" if isinstance(dog, (int, float)) else str(dog)
-                        frk_s = f"{frk:.2f}" if isinstance(frk, (int, float)) else str(frk)
-                        sembol = {"GÜVENİLİR": "✓", "ŞÜPHELİ — tekrar kontrol et": "⚠", "ARTEFAKT OLASI — güvenme": "✗", "GÜÇLÜ ADAY — ilk tarama hafife almış": "⭐"}.get(dur, "?")
-                        print(f"│ {vr['ligand']:<14} {ilk_s:>9} {dog_s:>10} {frk_s:>6} {sembol} {dur:<28} │")
-                    print("└" + "─" * 76 + "┘")
-                    print(f"[OK] Detaylı doğrulama raporu: {val_output}")
-            except Exception as _ve:
-                print(f"[UYARI] Otomatik doğrulama çalışmadı: {_ve}")
-                print("       Elle çalıştırmak için: python src/validate_top_candidates.py --help")
+        # Füzyon: TÜM iş (üretim + doğrulama) bittikten sonra 'done' yaz — böylece
+        # doğrulama özeti/hatası da UI'ya ulaşır.
+        if writer:
+            writer.finish(final, mode, validation=validation_summary)
 
     elif args.method == "pretrained":
         try:

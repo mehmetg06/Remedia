@@ -280,6 +280,13 @@ def render_fusion_monitor(ss):
         ss["fusion_active"] = False
         st.progress(1.0)
         st.success(f"✅ Füzyon tamamlandı — {len(res)} aday üretildi ve skorlandı.")
+        # Otomatik doğrulama özeti/hatası — sessizce yutma, kullanıcı görsün.
+        _val_msg = prog.get("validation")
+        if _val_msg:
+            if str(_val_msg).startswith("✅"):
+                st.success(_val_msg)
+            else:
+                st.warning(_val_msg)
         return
 
     if status == "error":
@@ -1169,12 +1176,16 @@ else:
                 _dur = str(_vrow.get("guven_durumu", "")).strip()
                 _frk = _vrow.get("fark")
                 _tutarlilik = cv_dict.get(_lname, "— Sadece Vina test edildi")
+                _sebep = str(_vrow.get("sebep", "") or "").strip()
+                if _sebep.lower() in ("nan",):
+                    _sebep = ""
                 if _lname:
                     ss["validated_data"][_lname] = {
                         "dogrulanmis_skor": float(_dog) if _dog not in ("", None) and str(_dog) not in ("nan", "") else None,
                         "guven_durumu": _dur,
                         "fark": float(_frk) if _frk not in ("", None) and str(_frk) not in ("nan", "") else None,
                         "tutarlilik": _tutarlilik,
+                        "sebep": _sebep,
                     }
         except Exception:
             pass
@@ -1283,9 +1294,14 @@ else:
                             badge_icon = "✗"
                             aciklama = "Bu skor ilk taramada artefakt olarak işaretlendi."
                         else:
+                            # DOĞRULANAMADI vb. — GERÇEK sebebi göster (genel mesaj değil).
                             badge_css = "background:#1E293B;color:#94A3B8;border:1px solid #334155"
                             badge_icon = "?"
-                            aciklama = "Doğrulama tamamlanamadı."
+                            _sebep = str(val_info.get("sebep", "") or "").strip()
+                            if _sebep:
+                                aciklama = f"Doğrulama tamamlanamadı — sebep: {_sebep}"
+                            else:
+                                aciklama = "Doğrulama tamamlanamadı."
 
                         tutarlilik = val_info.get("tutarlilik", "— Sadece Vina test edildi")
                         if "TUTARLI" in tutarlilik and "TUTARSIZ" not in tutarlilik:
