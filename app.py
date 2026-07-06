@@ -350,6 +350,28 @@ ss.setdefault("known_ligands_msg", "")        # Bölüm A
 ss.setdefault("pipeline_running", False)      # Bölüm B
 ss.setdefault("current_run_id", None)         # Bölüm C
 ss.setdefault("pipeline_done", False)         # Bölüm B
+ss.setdefault("prepared_receptor", None)      # "Reseptörü Hazırla" butonu
+
+try:
+    import yaml
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+except Exception:
+    cfg = {}
+
+
+def _refresh_known_ligands(uniprot_id: str) -> None:
+    """Bölüm A: hedef için ChEMBL'den bilinen inhibitörleri çeker ve session_state'e yazar."""
+    if not ss["pdb_info"]:
+        return
+    with st.spinner(f"🔍 {uniprot_id} için bilinen inhibitörler ChEMBL'de aranıyor..."):
+        try:
+            from known_ligands import fetch_known_ligands
+            ligands, msg = fetch_known_ligands(uniprot_id, max_results=5)
+            ss["known_ligands"] = ligands
+            ss["known_ligands_msg"] = msg
+        except Exception as exc:
+            ss["known_ligands"] = []
+            ss["known_ligands_msg"] = f"⚠️ Bilinen ligand araması başarısız: {exc}"
 
 # ============================================================================
 # ADIM 1 — HEDEF SEÇİMİ
@@ -380,17 +402,78 @@ if st.button("⬇️ Yapıyı İndir (AlphaFold DB)", type="primary"):
     except Exception as e:
         st.error(f"İndirme başarısız: {e}")
 
-    # ── BÖLÜM A: Bilinen ligandları otomatik çek ──────────────────────────
-    if ss["pdb_info"]:
-        with st.spinner(f"🔍 {uniprot} için bilinen inhibitörler ChEMBL'de aranıyor..."):
-            try:
-                from known_ligands import fetch_known_ligands
-                ligands, msg = fetch_known_ligands(uniprot, max_results=5)
-                ss["known_ligands"] = ligands
-                ss["known_ligands_msg"] = msg
-            except Exception as exc:
-                ss["known_ligands"] = []
-                ss["known_ligands_msg"] = f"⚠️ Bilinen ligand araması başarısız: {exc}"
+    _refresh_known_ligands(uniprot)
+
+st.markdown(
+    "<div class='plain' style='margin-top:-4px'>Ya da indirme → cep tespiti (fpocket) → "
+    "PDBQT dönüşümü (obabel) → en iyi cebi otomatik seçme adımlarının tamamını tek "
+    "seferde çalıştır:</div>",
+    unsafe_allow_html=True,
+)
+
+if st.button("🧪 Reseptörü Hazırla", type="primary"):
+    ss["uniprot"] = uniprot
+    ss["known_ligands"] = None
+    ss["known_ligands_msg"] = ""
+    ss["prepared_receptor"] = None
+
+    try:
+        with st.spinner(f"1/4 · {uniprot} yapısı AlphaFold DB'den indiriliyor..."):
+            import fetch_structure
+            pdb_path = fetch_structure.fetch_alphafold(uniprot)
+            ss["pdb_info"] = {"path": str(pdb_path), **analyze_pdb(pdb_path)}
+
+        with st.spinner("2/4 · fpocket ile bağlanma cepleri taranıyor..."):
+            import pocket_detection
+            best = pocket_detection.best_druggable_pocket(pdb_path)
+
+        pdbqt_path = ROOT / "data" / f"{uniprot}_alphafold.pdbqt"
+        with st.spinner("3/4 · obabel ile PDBQT dönüşümü yapılıyor..."):
+            conv = subprocess.run(
+                ["obabel", str(pdb_path), "-O", str(pdbqt_path), "-xr"],
+                capture_output=True, text=True,
+            )
+            if conv.returncode != 0 or not pdbqt_path.exists():
+                raise RuntimeError(f"obabel dönüşümü başarısız: {conv.stderr.strip()}")
+
+        with st.spinner("4/4 · en yüksek Druggability Score'a sahip cep seçiliyor..."):
+            box = cfg.get("box_size", [20.0, 20.0, 20.0])
+            ss["prepared_receptor"] = {
+                "uniprot": uniprot,
+                "pdb_path": str(pdb_path),
+                "pdbqt_path": str(pdbqt_path),
+                "pocket_number": best["pocket_number"],
+                "druggability": best["druggability"],
+                "score": best["score"],
+                "volume": best["volume"],
+                "center": best["center"],
+            }
+            ss["pocket"] = {
+                "name": f"Pocket {best['pocket_number']}",
+                "center": list(best["center"]),
+                "box": box,
+            }
+
+        cx, cy, cz = best["center"]
+        st.success(
+            f"✅ Reseptör hazır: **{uniprot}**, **Pocket {best['pocket_number']}**, "
+            f"merkez ({cx:.2f}, {cy:.2f}, {cz:.2f}) — `--receptor` ve `--center` alanları "
+            f"otomatik dolduruldu."
+        )
+    except Exception as e:
+        st.error(f"🔴 Reseptör hazırlama başarısız: {e}")
+
+    _refresh_known_ligands(uniprot)
+
+if ss.get("prepared_receptor"):
+    pr = ss["prepared_receptor"]
+    cx, cy, cz = pr["center"]
+    st.markdown(
+        f"<div class='run-tag'>🧪 Reseptör hazır: <b>{pr['uniprot']}</b> · "
+        f"Pocket <b>{pr['pocket_number']}</b> (Druggability {pr['druggability']:.3f}) · "
+        f"merkez <b>({cx:.2f}, {cy:.2f}, {cz:.2f})</b></div>",
+        unsafe_allow_html=True,
+    )
 
 if ss["pdb_info"]:
     info = ss["pdb_info"]
@@ -423,26 +506,33 @@ POCKET_HELP = {
     "Flexibility": "Cebin esnekliği (0–1). Yüksek = hareketli, bağlanmayı zorlaştırabilir.",
 }
 
-try:
-    import yaml
-    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
-except Exception:
-    cfg = {}
-
 pk = (cfg.get("dashboard", {}) or {}).get("pocket", {})
-center = cfg.get("pocket_center", [5.00, -1.02, -15.56])
 box = cfg.get("box_size", [20.0, 20.0, 20.0])
 
 import pandas as pd
-pocket_rows = [{
-    "Pocket": (cfg.get("dashboard", {}) or {}).get("pocket_name", "Pocket 9"),
-    "Score": pk.get("druggability", 0.168) * 100 if pk else 16.8,
-    "Druggability": pk.get("druggability", 0.168),
-    "Volume (Å³)": pk.get("volume", 384.8),
-    "Apolar SASA": pk.get("apolar_sasa", 0.871),
-    "Alpha spheres": pk.get("alpha_spheres", 31),
-    "Flexibility": pk.get("flexibility", 0.993),
-}]
+pr = ss.get("prepared_receptor")
+if pr:
+    center = list(pr["center"])
+    pocket_rows = [{
+        "Pocket": f"Pocket {pr['pocket_number']}",
+        "Score": pr.get("score", 0.0),
+        "Druggability": pr.get("druggability", 0.0),
+        "Volume (Å³)": pr.get("volume", 0.0),
+        "Apolar SASA": pk.get("apolar_sasa", "—"),
+        "Alpha spheres": pk.get("alpha_spheres", "—"),
+        "Flexibility": pk.get("flexibility", "—"),
+    }]
+else:
+    center = cfg.get("pocket_center", [5.00, -1.02, -15.56])
+    pocket_rows = [{
+        "Pocket": (cfg.get("dashboard", {}) or {}).get("pocket_name", "Pocket 9"),
+        "Score": pk.get("druggability", 0.168) * 100 if pk else 16.8,
+        "Druggability": pk.get("druggability", 0.168),
+        "Volume (Å³)": pk.get("volume", 384.8),
+        "Apolar SASA": pk.get("apolar_sasa", 0.871),
+        "Alpha spheres": pk.get("alpha_spheres", 31),
+        "Flexibility": pk.get("flexibility", 0.993),
+    }]
 pocket_df = pd.DataFrame(pocket_rows)
 
 st.dataframe(
