@@ -101,16 +101,27 @@ if command -v fpocket >/dev/null 2>&1; then
     echo "  fpocket zaten kurulu, atlanıyor."
 else
     echo "  fpocket bulunamadı, kaynaktan derleniyor..."
-    apt_install build-essential git >/dev/null 2>&1 || true
+    apt_install build-essential g++ git >/dev/null 2>&1 || true
     FP_SRC="$(mktemp -d)"
+    FP_LOG="$(mktemp)"
+    # ÖNEMLİ: fpocket Makefile'ı, ortamda CXX değişkeni tam olarak "g++" değilse
+    # (birçok devcontainer/Codespaces CXX'i g++-13, clang++ vb. olarak export eder)
+    # sessizce clang'a düşer. clang kurulu değilse derleme başarısız olur ve bu
+    # yüzden "fpocket hariç her şey kuruldu" durumu oluşur. Derlemeyi gcc/g++ ile
+    # sabitlemek için CXX=g++ CC=gcc'yi açıkça geçiriyoruz.
+    # NOT: fpocket Makefile'ı paralel derlemeye uygun DEĞİL (qhull alt dizininde
+    # yarış koşulu var), bu yüzden -j KULLANMIYORUZ; seri derleme güvenilir.
     if git clone --depth 1 https://github.com/Discngine/fpocket.git "$FP_SRC" >/dev/null 2>&1 \
-        && make -C "$FP_SRC" >/dev/null 2>&1; then
+        && make -C "$FP_SRC" CXX=g++ CC=gcc >"$FP_LOG" 2>&1; then
         # `make install` BINDIR'i /usr/local/bin varsayar; hedef dizine kopyalıyoruz.
         for b in "$FP_SRC"/bin/*; do
             [ -f "$b" ] && [ -x "$b" ] && $BIN_SUDO cp "$b" "$BIN_DIR/"
         done
+    else
+        echo "  ⚠️  Kaynaktan derleme başarısız. Son satırlar:"
+        tail -n 15 "$FP_LOG" 2>/dev/null | sed 's/^/      /'
     fi
-    rm -rf "$FP_SRC"
+    rm -rf "$FP_SRC" "$FP_LOG"
 
     if ! command -v fpocket >/dev/null 2>&1 && command -v conda >/dev/null 2>&1; then
         echo "  Kaynaktan derleme başarısız, conda ile deneniyor..."
