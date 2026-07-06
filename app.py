@@ -667,7 +667,7 @@ if st.button("▶️ Molekülleri Üret ve Skorla", type="primary"):
                 mols = mg.random_mutation(seeds, n=int(params["n"]))
             elif method == "brics":
                 mols = mg.brics_recombination(seeds, n=int(params["n"]))
-            else:
+            elif method == "genetic":
                 gen_log = []
 
                 def log_fn(msg):
