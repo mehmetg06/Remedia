@@ -4,6 +4,11 @@ data/*.pdbqt
 data/*_out/
 data/*_out/**
 data/ligands_prepared/
+data/ligands_prepared_run_*/
+data/*_run_*/
+data/verify/
+data/**/*.pdbqt
+data/**/*.sdf
 data/pocket_info.txt
 data/generated.smi
 results/
