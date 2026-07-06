@@ -549,7 +549,7 @@ pocket_df = pd.DataFrame(pocket_rows)
 
 st.dataframe(
     pocket_df,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         col: st.column_config.Column(help=POCKET_HELP.get(col, ""))
@@ -613,7 +613,7 @@ elif known_ligands:
             # 2D çizim
             png = mol_to_png_bytes(lig["smiles"], size=(200, 150))
             if png:
-                st.image(png, use_container_width=True)
+                st.image(png, width="stretch")
             # Bilgi
             st.markdown(
                 f"<b style='font-size:0.9rem'>{lig['name']}</b><br>"
@@ -1021,7 +1021,7 @@ else:
         if docking_csv.exists():
             st.markdown("**📊 Docking Skorları**")
             _ddf = pd.read_csv(docking_csv)
-            st.dataframe(_ddf, use_container_width=True, hide_index=True)
+            st.dataframe(_ddf, width="stretch", hide_index=True)
             st.download_button("⬇️ İndir", data=_ddf.to_csv(index=False).encode(),
                                file_name=f"{selected_run}_docking.csv", mime="text/csv")
         else:
@@ -1031,7 +1031,7 @@ else:
         if admet_csv.exists():
             st.markdown("**🧪 ADMET Filtresi**")
             _adf = pd.read_csv(admet_csv)
-            st.dataframe(_adf, use_container_width=True, hide_index=True)
+            st.dataframe(_adf, width="stretch", hide_index=True)
             st.download_button("⬇️ İndir", data=_adf.to_csv(index=False).encode(),
                                file_name=f"{selected_run}_admet.csv", mime="text/csv")
         else:
@@ -1041,7 +1041,7 @@ else:
         if ranking_csv.exists():
             st.markdown("**🏆 Final Sıralama**")
             _rdf = pd.read_csv(ranking_csv)
-            st.dataframe(_rdf, use_container_width=True, hide_index=True)
+            st.dataframe(_rdf, width="stretch", hide_index=True)
             st.download_button("⬇️ İndir", data=_rdf.to_csv(index=False).encode(),
                                file_name=f"{selected_run}_ranking.csv", mime="text/csv")
         else:
