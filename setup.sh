@@ -64,6 +64,46 @@ else
     apt_install openbabel || echo "  ⚠️  obabel apt ile kurulamadı; openbabel-wheel python paketi yeterli olabilir."
 fi
 
+# ── Miniconda ─────────────────────────────────────────────────────────────────
+# conda; fpocket/vina/smina için son çare (fallback) kurulum yöntemi olarak
+# kullanılıyor. Ortamda conda yoksa Miniconda'yı sessizce kur ki bu fallback'ler
+# çalışabilsin. İdempotent: conda zaten varsa (ya da daha önce kurulduysa) atlar.
+if ! command -v conda >/dev/null 2>&1; then
+    # Daha önce bu script tarafından kurulmuş olabilir; PATH'e alıp tekrar bak.
+    if [ -x "$HOME/miniconda3/bin/conda" ]; then
+        export PATH="$HOME/miniconda3/bin:$PATH"
+    fi
+fi
+
+echo ""
+if command -v conda >/dev/null 2>&1; then
+    echo "conda zaten kurulu, Miniconda kurulumu atlanıyor."
+else
+    echo "conda bulunamadı, Miniconda kuruluyor..."
+    # Mimariye göre doğru installer'ı seç.
+    MC_ARCH="$(uname -m)"
+    case "$MC_ARCH" in
+        x86_64)          MC_FILE="Miniconda3-latest-Linux-x86_64.sh" ;;
+        aarch64|arm64)   MC_FILE="Miniconda3-latest-Linux-aarch64.sh" ;;
+        *)               MC_FILE="" ;;
+    esac
+
+    if [ -z "$MC_FILE" ]; then
+        echo "  ⚠️  Desteklenmeyen mimari ($MC_ARCH); Miniconda kurulamadı."
+    else
+        MC_TMP="$(mktemp)"
+        MC_PREFIX="$HOME/miniconda3"
+        if curl -fsSL --retry 3 -o "$MC_TMP" "https://repo.anaconda.com/miniconda/$MC_FILE" \
+            && bash "$MC_TMP" -b -p "$MC_PREFIX" >/dev/null 2>&1; then
+            export PATH="$MC_PREFIX/bin:$PATH"
+            echo "  ✓ Miniconda kuruldu ($MC_PREFIX)."
+        else
+            echo "  ⚠️  Miniconda kurulamadı; conda tabanlı yedek kurulumlar atlanacak."
+        fi
+        rm -f "$MC_TMP"
+    fi
+fi
+
 # ── conda ToS onayı ───────────────────────────────────────────────────────────
 # Miniconda kurulduktan HEMEN SONRA, conda ile herhangi bir paket (fpocket/vina/
 # smina) kurulmaya çalışılmadan ÖNCE Anaconda kanallarının Kullanım Koşullarını
