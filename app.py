@@ -19,11 +19,13 @@ anlar. Hiçbir şey gizli/collapsed menüde değildir.
 """
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import random
 import string
 from datetime import datetime, timezone
@@ -147,6 +149,170 @@ def get_latest_run_id() -> str | None:
 
 def run_dir_path(run_id: str) -> Path:
     return ROOT / "results" / run_id
+
+
+# ============================================================================
+# FÜZYON — ayrı süreç (subprocess) + ilerleme dosyası (Sorun 1)
+# Füzyon/GA, Streamlit'in ana script akışından TAMAMEN AYRILIR: ayrı bir
+# subprocess olarak (molecule_generator.py --method fusion) çalışır. Ana thread
+# beklemez; ilerlemeyi bir JSON dosyasından okuyup gösterir. Böylece log_fn
+# kaynaklı rerun'lar süreci baştan başlatamaz.
+# ============================================================================
+# Füzyon ara dosyaları (results/ altındaki "run_" ön ekiyle ÇAKIŞMAZ, yani
+# geçmiş pipeline çalıştırmaları listesini kirletmez).
+FUSION_WORK_ROOT = ROOT / "results" / "_fusion_runs"
+
+
+def _pid_alive(pid) -> bool:
+    """Verilen PID'li süreç hâlâ yaşıyor mu? (Çift-başlatma koruması için.)
+    Zombie (savunmasızca çöken ve reap edilmemiş) süreçleri ÖLÜ sayar; aksi
+    halde çöken bir alt-süreç monitörü sonsuz döngüde bırakabilir."""
+    if not pid:
+        return False
+    try:
+        pid = int(pid)
+    except (ValueError, TypeError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # Linux: /proc üzerinden zombie durumunu tespit et.
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        state = stat.rsplit(")", 1)[1].split()[0]
+        if state == "Z":
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _read_progress(path) -> dict | None:
+    """İlerleme JSON'unu güvenle okur (yazım anına denk gelirse None döner)."""
+    if not path:
+        return None
+    try:
+        p = Path(path)
+        if not p.exists():
+            return None
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
+def launch_fusion(seeds: list[str], docking_opts: dict | None, ss) -> bool:
+    """Füzyonu AYRI bir subprocess olarak başlatır. Zaten canlı bir süreç varsa
+    YENİ süreç KESİNLİKLE başlatmaz (Sorun 1). Başlattıysa True döner."""
+    if ss.get("fusion_active") and _pid_alive(ss.get("fusion_process_pid")):
+        return False  # zaten çalışıyor
+
+    fid = (datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_"
+           + "".join(random.choices(string.ascii_lowercase + string.digits, k=4)))
+    work = FUSION_WORK_ROOT / fid
+    work.mkdir(parents=True, exist_ok=True)
+
+    seeds_file = work / "seeds.smi"
+    seeds_file.write_text("\n".join(seeds) + "\n")
+    progress_file = work / "progress.json"
+    output_file = work / "generated.smi"
+
+    cmd = [
+        sys.executable, str(SRC / "molecule_generator.py"),
+        "--method", "fusion",
+        "--seeds-file", str(seeds_file),
+        "--output", str(output_file),
+        "--progress-file", str(progress_file),
+    ]
+    if docking_opts:
+        cmd += [
+            "--receptor", str(docking_opts["receptor"]),
+            "--center", *[str(x) for x in docking_opts["center"]],
+            "--size", *[str(x) for x in docking_opts["box_size"]],
+            "--exhaustiveness", str(docking_opts.get("exhaustiveness", 8)),
+            "--workdir", str(work / "ga_work"),
+        ]
+
+    # start_new_session: süreç kendi oturumunda çalışsın (Streamlit yeniden
+    # çalışsa/bağlantı kopsa bile devam etsin). Çıktıyı yutuyoruz; ilerleme
+    # zaten progress.json'a yazılıyor.
+    proc = subprocess.Popen(
+        cmd, cwd=str(ROOT),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    ss["fusion_process_pid"] = proc.pid
+    ss["fusion_progress_file"] = str(progress_file)
+    ss["fusion_output_file"] = str(output_file)
+    ss["fusion_active"] = True
+    return True
+
+
+def render_fusion_monitor(ss):
+    """İlerleme dosyasını okuyup KOMPAKT bir st.progress() çubuğu + 'X/Y molekül,
+    tahmini kalan Z dk' gösterir. Süreç çalışırken kısa aralıklarla st.rerun()
+    yapar — ama SADECE dosyayı okumak için; subprocess YENİDEN BAŞLAMAZ."""
+    prog = _read_progress(ss.get("fusion_progress_file"))
+    alive = _pid_alive(ss.get("fusion_process_pid"))
+    status = (prog or {}).get("status", "running")
+
+    done = int((prog or {}).get("done", 0) or 0)
+    total = int((prog or {}).get("total", 0) or 0)
+    stage = (prog or {}).get("stage", "Başlıyor")
+    best = (prog or {}).get("best")
+    elapsed = float((prog or {}).get("elapsed", 0.0) or 0.0)
+
+    # ── Tamamlandı: sonuçları session_state'e al (senkron yolla aynı format) ──
+    if status == "done" and prog is not None:
+        res = []
+        for item in prog.get("results", []):
+            try:
+                smi, aff = item[0], float(item[1])
+            except Exception:
+                continue
+            if smi and Chem.MolFromSmiles(smi):
+                res.append((smi, aff))
+        res.sort(key=lambda x: x[1])
+        ss["results"] = res
+        ss["mode"] = prog.get("mode", "qed_fallback")
+        ss["fusion_active"] = False
+        st.progress(1.0)
+        st.success(f"✅ Füzyon tamamlandı — {len(res)} aday üretildi ve skorlandı.")
+        return
+
+    if status == "error":
+        ss["fusion_active"] = False
+        st.error(f"🔴 Füzyon hatası: {(prog or {}).get('error', 'bilinmiyor')}")
+        return
+
+    if not alive:
+        # Süreç bitti ama 'done' yazmadı → beklenmedik sonlanma.
+        ss["fusion_active"] = False
+        st.error("🔴 Füzyon süreci beklenmedik şekilde sonlandı. Lütfen tekrar dene.")
+        return
+
+    # ── Hâlâ çalışıyor: kompakt ilerleme çubuğu ──────────────────────────────
+    frac = max(0.0, min(1.0, (done / total) if total > 0 else 0.0))
+    st.progress(frac)
+
+    if done > 0 and total > done and elapsed > 0:
+        remaining = elapsed / done * (total - done)
+        eta = f"~{remaining / 60:.1f} dk" if remaining >= 60 else f"~{remaining:.0f} sn"
+    else:
+        eta = "hesaplanıyor…"
+    best_txt = (f" · en iyi <span class='tech'>{best:.2f} kcal/mol</span>"
+                if isinstance(best, (int, float)) else "")
+    st.markdown(
+        f"<div class='plain'>⚡ <b>{stage}</b> · <b>{done}/{total}</b> molekül · "
+        f"tahmini kalan: <b>{eta}</b>{best_txt}</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Kısa bekle ve yalnızca dosyayı yeniden okumak için rerun et.
+    time.sleep(1.0)
+    st.rerun()
 
 
 # ============================================================================
@@ -363,6 +529,10 @@ ss.setdefault("pipeline_running", False)      # Bölüm B
 ss.setdefault("current_run_id", None)         # Bölüm C
 ss.setdefault("pipeline_done", False)         # Bölüm B
 ss.setdefault("prepared_receptor", None)      # "Reseptörü Hazırla" butonu
+ss.setdefault("fusion_active", False)         # Füzyon ayrı süreçte çalışıyor mu
+ss.setdefault("fusion_process_pid", None)     # Füzyon subprocess PID'i (çift-başlatma koruması)
+ss.setdefault("fusion_progress_file", None)   # İlerleme JSON dosyasının yolu
+ss.setdefault("fusion_output_file", None)     # Üretilen .smi çıktısının yolu
 
 try:
     import yaml
@@ -755,11 +925,6 @@ if st.button("▶️ Molekülleri Üret ve Skorla", type="primary"):
         st.warning("Pretrained model plugin'i kurulu değil (opsiyonel). "
                    "random / brics / genetic yöntemlerini kullanabilirsin.")
     else:
-        summary = st.empty()
-        progress = st.progress(0.0)
-        log_box = st.container()
-        log_lines = []
-
         docking_opts = None
         if use_real_docking and ss["pocket"]:
             docking_opts = {
@@ -770,70 +935,73 @@ if st.button("▶️ Molekülleri Üret ve Skorla", type="primary"):
                 "exhaustiveness": cfg.get("exhaustiveness", 8),
             }
 
-        with st.spinner("Moleküller üretiliyor..."):
-            if method == "random":
-                mols = mg.random_mutation(seeds, n=int(params["n"]))
-            elif method == "brics":
-                mols = mg.brics_recombination(seeds, n=int(params["n"]))
-            elif method == "genetic":
-                gen_log = []
-
-                def log_fn(msg):
-                    gen_log.append(msg)
-                    with log_box:
-                        st.code("\n".join(gen_log[-12:]), language=None)
-
-                final, mode = mg.genetic_algorithm(
-                    seeds,
-                    generations=int(params["generations"]),
-                    population_size=int(params["population"]),
-                    mutation_rate=float(params["mutation_rate"]),
-                    docking_opts=docking_opts,
-                    log_fn=log_fn,
-                )
-                mols = [s for s, _ in final]
-            elif method == "fusion":
-                gen_log = []
-
-                def log_fn(msg):
-                    gen_log.append(msg)
-                    with log_box:
-                        st.code("\n".join(gen_log[-12:]), language=None)
-                        
-                final, mode = mg.fusion_generation(
-                    seeds,
-                    docking_opts=docking_opts,
-                    log_fn=log_fn,
-                )
-                mols = [s for s, _ in final]
-
-        scored = []
-        if method in ["genetic", "fusion"]:
-            for smi, aff in final:
-                scored.append((smi, aff))
-            ss["mode"] = mode
+        if method == "fusion":
+            # Füzyonu AYRI süreçte başlat (Sorun 1). Ana thread beklemez;
+            # ilerleme aşağıdaki monitör tarafından dosyadan okunarak gösterilir.
+            started = launch_fusion(seeds, docking_opts, ss)
+            if not started:
+                st.info("⚡ Füzyon zaten çalışıyor — mevcut süreç izleniyor.")
+            st.rerun()
         else:
-            total = len(mols)
-            for i, smi in enumerate(mols):
-                sc, current_mode = mg.score_population([smi], docking_opts)
-                aff = sc.get(smi, 999.0)
-                scored.append((smi, aff))
-                ss["mode"] = current_mode
-                progress.progress((i + 1) / max(total, 1))
-                best = min(a for _, a in scored)
-                summary.markdown(
-                    f"<div class='plain'><b>{i+1}/{total}</b> molekül test edildi · "
-                    f"şu ana kadar en iyisi <span class='tech'>{best:.3f} kcal/mol</span></div>",
-                    unsafe_allow_html=True)
-                log_lines.append(f"[{i+1:>3}/{total}] {aff:>8.3f} kcal/mol   {smi}")
-                with log_box:
-                    st.code("\n".join(log_lines[-12:]), language=None)
+            summary = st.empty()
+            progress = st.progress(0.0)
+            log_box = st.container()
+            log_lines = []
 
-        progress.progress(1.0)
-        scored = [(s, a) for s, a in scored if s and Chem.MolFromSmiles(s)]
-        scored.sort(key=lambda x: x[1])
-        ss["results"] = scored
-        st.success(f"Tamamlandı — {len(scored)} molekül üretildi ve skorlandı.")
+            with st.spinner("Moleküller üretiliyor..."):
+                if method == "random":
+                    mols = mg.random_mutation(seeds, n=int(params["n"]))
+                elif method == "brics":
+                    mols = mg.brics_recombination(seeds, n=int(params["n"]))
+                elif method == "genetic":
+                    gen_log = []
+
+                    def log_fn(msg):
+                        gen_log.append(msg)
+                        with log_box:
+                            st.code("\n".join(gen_log[-12:]), language=None)
+
+                    final, mode = mg.genetic_algorithm(
+                        seeds,
+                        generations=int(params["generations"]),
+                        population_size=int(params["population"]),
+                        mutation_rate=float(params["mutation_rate"]),
+                        docking_opts=docking_opts,
+                        log_fn=log_fn,
+                    )
+                    mols = [s for s, _ in final]
+
+            scored = []
+            if method == "genetic":
+                for smi, aff in final:
+                    scored.append((smi, aff))
+                ss["mode"] = mode
+            else:
+                total = len(mols)
+                for i, smi in enumerate(mols):
+                    sc, current_mode = mg.score_population([smi], docking_opts)
+                    aff = sc.get(smi, 999.0)
+                    scored.append((smi, aff))
+                    ss["mode"] = current_mode
+                    progress.progress((i + 1) / max(total, 1))
+                    best = min(a for _, a in scored)
+                    summary.markdown(
+                        f"<div class='plain'><b>{i+1}/{total}</b> molekül test edildi · "
+                        f"şu ana kadar en iyisi <span class='tech'>{best:.3f} kcal/mol</span></div>",
+                        unsafe_allow_html=True)
+                    log_lines.append(f"[{i+1:>3}/{total}] {aff:>8.3f} kcal/mol   {smi}")
+                    with log_box:
+                        st.code("\n".join(log_lines[-12:]), language=None)
+
+            progress.progress(1.0)
+            scored = [(s, a) for s, a in scored if s and Chem.MolFromSmiles(s)]
+            scored.sort(key=lambda x: x[1])
+            ss["results"] = scored
+            st.success(f"Tamamlandı — {len(scored)} molekül üretildi ve skorlandı.")
+
+# ── Füzyon ilerleme monitörü (ayrı süreç canlıyken her rerun'da çalışır) ──────
+if ss.get("fusion_active"):
+    render_fusion_monitor(ss)
 
 st.divider()
 

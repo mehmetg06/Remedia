@@ -36,7 +36,9 @@ Kullanım örnekleri:
         --output data/generated.smi
 """
 import argparse
+import json
 import random
+import time
 from pathlib import Path
 
 from rdkit import Chem
@@ -266,10 +268,25 @@ def _pseudo_affinity(smi: str) -> float:
     return -(2.0 + qed * 10.0)
 
 
-def score_population(smiles_list: list[str], docking_opts: dict | None) -> tuple[dict[str, float], str]:
-    """Popülasyondaki her molekülü skorlar ve hangi modun kullanıldığını döndürür."""
+def score_population(
+    smiles_list: list[str],
+    docking_opts: dict | None,
+    tick_cb=None,
+    n_jobs: int | None = None,
+) -> tuple[dict[str, float], str]:
+    """Popülasyondaki her molekülü skorlar ve hangi modun kullanıldığını döndürür.
+
+    tick_cb: Bir molekül skorlanınca çağrılan opsiyonel geri-çağrı (ilerleme
+             çubuğu için). Argümansız çağrılır.
+    n_jobs:  Gerçek docking'te kullanılacak paralel işlem sayısı (None → otomatik).
+    """
     if not docking_opts:
-        return {smi: _pseudo_affinity(smi) for smi in smiles_list}, "qed_fallback"
+        scores = {}
+        for smi in smiles_list:
+            scores[smi] = _pseudo_affinity(smi)
+            if tick_cb:
+                tick_cb()
+        return scores, "qed_fallback"
 
     scores, mode = _dock_smiles(
         smiles_list,
@@ -278,59 +295,121 @@ def score_population(smiles_list: list[str], docking_opts: dict | None) -> tuple
         box_size=docking_opts["box_size"],
         workdir=docking_opts["workdir"],
         exhaustiveness=docking_opts.get("exhaustiveness", 8),
+        tick_cb=tick_cb,
+        n_jobs=n_jobs,
     )
     return {smi: (scores.get(smi) if scores.get(smi) is not None else 999.0)
             for smi in smiles_list}, mode
 
 
-def _dock_smiles(smiles_list, receptor, center, box_size, workdir, exhaustiveness=8):
-    """SMILES listesini gerçek Vina docking'inden geçirir ve {SMILES: affinity}
-    döndürür. ligand_prep ve docking modüllerini fonksiyon olarak import eder
-    (CLI bozulmaz). Vina/meeko kurulu değilse yedek fitness'e düşer."""
+def _resolve_n_jobs(n_jobs: int | None, n_items: int) -> int:
+    """Kullanılacak paralel çekirdek sayısını belirler. Codespaces genelde 2-4
+    çekirdek verir; hepsini kullanmak yerine biraz pay bırakırız."""
+    import os
+    if n_jobs is not None and n_jobs > 0:
+        return max(1, min(n_jobs, n_items))
+    cpu = os.cpu_count() or 1
+    return max(1, min(cpu, n_items))
+
+
+def _dock_one_worker(task):
+    """Tek bir SMILES için 3D hazırlama + Vina docking yapan işçi fonksiyon
+    (multiprocessing.Pool ile ayrı bir çekirdekte çalışır). (SMILES, skor) döner;
+    hata olursa skor None'dur. Her işçi Vina'yı cpu=1 ile çalıştırır ki N işçi
+    çekirdekleri aşırı-abone (oversubscribe) etmesin."""
+    smi, name, receptor, center, box_size, prepared_dir, poses_dir, exhaustiveness = task
+    import sys as _sys
+    src_dir = Path(__file__).resolve().parent
+    if str(src_dir) not in _sys.path:
+        _sys.path.insert(0, str(src_dir))
     try:
-        # Aynı klasördeki modülleri import et.
-        import importlib.util
+        import ligand_prep  # noqa: E402
+        from vina import Vina  # noqa: E402
+    except Exception:
+        return smi, None
+    try:
+        sdf = ligand_prep.prepare_ligand(smi, name, Path(prepared_dir))
+        if sdf is None:
+            return smi, None
+        pdbqt = ligand_prep.convert_to_pdbqt(sdf)
+        if pdbqt is None:
+            return smi, None
+        v = Vina(sf_name="vina", cpu=1, verbosity=0)
+        v.set_receptor(str(receptor))
+        v.set_ligand_from_file(str(pdbqt))
+        v.compute_vina_maps(center=list(center), box_size=list(box_size))
+        v.dock(exhaustiveness=exhaustiveness, n_poses=10)
+        best_score = float(v.energies(n_poses=1)[0][0])
+        try:
+            Path(poses_dir).mkdir(parents=True, exist_ok=True)
+            v.write_poses(str(Path(poses_dir) / f"{name}_docked.pdbqt"), n_poses=1, overwrite=True)
+        except Exception:
+            pass
+        return smi, best_score
+    except Exception:
+        return smi, None
+
+
+def _dock_smiles(smiles_list, receptor, center, box_size, workdir, exhaustiveness=8,
+                 tick_cb=None, n_jobs=None):
+    """SMILES listesini gerçek Vina docking'inden geçirir ve {SMILES: affinity}
+    döndürür. Docking'i multiprocessing.Pool ile birden fazla çekirdekte PARALEL
+    çalıştırır (Codespaces'in sınırlı CPU'sunu verimli kullanmak için). Vina/meeko
+    kurulu değilse ya da paralel çalışma başarısız olursa yedek QED fitness'e düşer."""
+    try:
         import sys
         src_dir = Path(__file__).resolve().parent
         if str(src_dir) not in sys.path:
             sys.path.insert(0, str(src_dir))
-        import ligand_prep  # noqa: E402
-        import docking  # noqa: E402
+        import ligand_prep  # noqa: F401,E402  (işçi süreçte de kullanılır)
+        import vina  # noqa: F401,E402  (kurulu mu diye kontrol)
     except Exception as e:
         print(f"[UYARI] Docking modülleri yüklenemedi ({e}); yedek fitness kullanılıyor.")
+        for smi in smiles_list:
+            if tick_cb:
+                tick_cb()
         return {smi: _pseudo_affinity(smi) for smi in smiles_list}, "qed_fallback"
 
     workdir = Path(workdir)
     prepared = workdir / "prepared"
     poses = workdir / "poses"
     prepared.mkdir(parents=True, exist_ok=True)
+    poses.mkdir(parents=True, exist_ok=True)
 
-    # Her SMILES'e kararlı bir isim ver ve 3D/PDBQT hazırla.
-    name_to_smi = {}
+    tasks = []
     for i, smi in enumerate(smiles_list):
         name = f"gen_{i:04d}"
-        name_to_smi[name] = smi
-        try:
-            sdf = ligand_prep.prepare_ligand(smi, name, prepared)
-            if sdf is not None:
-                ligand_prep.convert_to_pdbqt(sdf)
-        except Exception as e:
-            print(f"[UYARI] {name} hazırlanamadı: {e}")
-
-    try:
-        results = docking.dock_all(
-            Path(receptor), prepared, center=list(center), box_size=list(box_size),
-            poses_dir=poses, exhaustiveness=exhaustiveness,
-        )
-    except Exception as e:
-        print(f"[UYARI] Vina docking çalışmadı ({e}); yedek fitness kullanılıyor.")
-        return {smi: _pseudo_affinity(smi) for smi in smiles_list}, "qed_fallback"
+        tasks.append((smi, name, str(receptor), list(center), list(box_size),
+                      str(prepared), str(poses), exhaustiveness))
 
     smi_scores = {}
-    for r in results:
-        smi = name_to_smi.get(r["ligand"])
-        if smi is not None:
-            smi_scores[smi] = r["affinity_kcal_mol"]
+    n_workers = _resolve_n_jobs(n_jobs, len(tasks))
+    try:
+        if n_workers > 1 and len(tasks) > 1:
+            import multiprocessing as mp
+            ctx = mp.get_context("fork") if hasattr(mp, "get_context") else mp
+            print(f"[INFO] {len(tasks)} molekül {n_workers} çekirdekte paralel docklaniyor...")
+            with ctx.Pool(processes=n_workers) as pool:
+                for smi, score in pool.imap_unordered(_dock_one_worker, tasks):
+                    smi_scores[smi] = score
+                    if tick_cb:
+                        tick_cb()
+        else:
+            for task in tasks:
+                smi, score = _dock_one_worker(task)
+                smi_scores[smi] = score
+                if tick_cb:
+                    tick_cb()
+    except Exception as e:
+        print(f"[UYARI] Paralel docking çalışmadı ({e}); yedek fitness kullanılıyor.")
+        for smi in smiles_list:
+            smi_scores.setdefault(smi, None)
+            if tick_cb:
+                tick_cb()
+        # En azından skorlanamayanlara QED vekili ver ki GA ilerleyebilsin.
+        return {smi: (sc if sc is not None else _pseudo_affinity(smi))
+                for smi, sc in ((s, smi_scores.get(s)) for s in smiles_list)}, "qed_fallback"
+
     return smi_scores, "real_docking"
 
 
@@ -345,6 +424,9 @@ def genetic_algorithm(
     refresh_every: int = 3,
     adaptive_mutation: bool = True,
     scaffold_diversity_threshold: float = 0.3,
+    tick_cb=None,
+    stage_cb=None,
+    n_jobs: int | None = None,
 ) -> tuple[list[tuple[str, float]], str]:
     # --- Başlangıç popülasyonu ---
     seed_set = [s for s in seeds if Chem.MolFromSmiles(s) is not None]
@@ -361,12 +443,15 @@ def genetic_algorithm(
     current_mode = "qed_fallback"
 
     for gen in range(1, generations + 1):
-        scores, current_mode = score_population(population, docking_opts)
+        scores, current_mode = score_population(population, docking_opts,
+                                                tick_cb=tick_cb, n_jobs=n_jobs)
         # Daha negatif affinity = daha iyi fitness → küçükten büyüğe sırala.
         ranked = sorted(population, key=lambda s: scores.get(s, 999.0))
         best_smi = ranked[0]
         best_score = scores.get(best_smi, 999.0)
         history.append((best_smi, best_score))
+        if stage_cb:
+            stage_cb(f"Genetik optimizasyon — nesil {gen}/{generations}", best_score)
         
         # Çeşitlilik ölçümü
         scaffolds = set()
@@ -413,7 +498,8 @@ def genetic_algorithm(
                 new_pop.add(child)
         population = list(new_pop)[:population_size]
 
-    final_scores, current_mode = score_population(population, docking_opts)
+    final_scores, current_mode = score_population(population, docking_opts,
+                                                  tick_cb=tick_cb, n_jobs=n_jobs)
     ranked = sorted(population, key=lambda s: final_scores.get(s, 999.0))
     return [(s, final_scores.get(s, 999.0)) for s in ranked], current_mode
 
@@ -446,35 +532,91 @@ def generate_with_pretrained_model(seeds: list[str], n: int, model_config: dict 
 # ============================================================================
 # e) FÜZYON ÜRETİM MOTORU
 # ============================================================================
+# Füzyon motorunun VARSAYILAN (demo/test için hızlı) parametreleri.
+# Kullanıcı isterse büyütebilir; varsayılan bilinçli olarak KÜÇÜK tutulur ki
+# Codespaces'in sınırlı CPU'sunda birkaç dakikada bitsin.
+FUSION_DEFAULT_POOL = 40          # keşif havuzu (eskiden ~100)
+FUSION_DEFAULT_POPULATION = 15    # GA popülasyonu (eskiden 30)
+FUSION_DEFAULT_GENERATIONS = 3    # GA nesil sayısı (eskiden 5)
+FUSION_DEFAULT_QED = 0.5          # ön eleme QED eşiği (eskiden 0.3 — çok gevşekti)
+
+
 def fusion_generation(
     seeds: list[str],
     docking_opts: dict | None,
-    log_fn=print
+    log_fn=print,
+    discovery_pool: int = FUSION_DEFAULT_POOL,
+    population_size: int = FUSION_DEFAULT_POPULATION,
+    generations: int = FUSION_DEFAULT_GENERATIONS,
+    pre_screen_keep: int | None = None,
+    qed_threshold: float = FUSION_DEFAULT_QED,
+    n_jobs: int | None = None,
+    progress_fn=None,
 ) -> tuple[list[tuple[str, float]], str]:
-    """Dört aşamalı füzyon üretim motoru: Geniş keşif -> Ön Eleme -> Genetik Opt. -> Son Rafinasyon"""
+    """Dört aşamalı füzyon üretim motoru: Geniş keşif -> Ön Eleme -> Genetik Opt. -> Son Rafinasyon.
+
+    progress_fn: Opsiyonel ilerleme geri-çağrısı. Her çağrıldığında bir durum
+                 sözlüğü alır: {stage, done, total, best, ...}. UI ilerleme
+                 çubuğu ve "X/Y molekül, tahmini kalan Z dk" için bunu kullanır.
+    """
+    # pre_screen_keep verilmezse GA popülasyonu kadar molekül tut → docking
+    # maliyeti üst sınırdan bağlanır (Sorun 3: gereksiz pahalı docking'i önle).
+    if pre_screen_keep is None:
+        pre_screen_keep = population_size
+
+    # --- İlerleme durumu ---------------------------------------------------
+    # total = GA'nın skorlayacağı toplam molekül-docking birimi (pop * nesil)
+    #         + rafinasyon havuzu (nesil sonunda kesinleşir, tahminle başlarız).
+    state = {
+        "stage": "Başlıyor",
+        "done": 0,
+        "total": population_size * generations + population_size,
+        "best": None,
+    }
+
+    def _emit():
+        if progress_fn:
+            progress_fn(dict(state))
+
+    def tick_cb():
+        state["done"] += 1
+        _emit()
+
+    def stage_cb(label, best):
+        state["stage"] = label
+        if best is not None and (state["best"] is None or best < state["best"]):
+            state["best"] = best
+        _emit()
+
     log_fn("⚡ FÜZYON ÜRETİM MOTORU BAŞLIYOR ⚡")
+    stage_cb("Aşama A: Geniş keşif", None)
+
     # AŞAMA A — GENİŞ KEŞİF
     log_fn("\n--- AŞAMA A: GENİŞ KEŞİF ---")
     pool = set()
     seed_set = [s for s in seeds if Chem.MolFromSmiles(s) is not None]
-    
-    mut_pool = random_mutation(seed_set, n=50)
-    pool.update(mut_pool)
-    brics_pool = brics_recombination(seed_set, n=50)
-    pool.update(brics_pool)
+
+    half = max(2, discovery_pool // 2)
+    pool.update(random_mutation(seed_set, n=half))
+    pool.update(brics_recombination(seed_set, n=half))
     pool_list = list(pool)
     log_fn(f"Keşif havuzu boyutu: {len(pool_list)}")
 
     # AŞAMA B — ÖN ELEME
+    # is_reasonable + QED>=eşik + Lipinski ile filtreler, SONRA QED'e göre
+    # sıralayıp en iyi `pre_screen_keep` molekülü tutar. Böylece ön eleme hem
+    # gerçekten seçici olur hem de kaç molekülün pahalı docking'e gireceği
+    # üst sınırdan bağlanır.
     log_fn("\n--- AŞAMA B: ÖN ELEME ---")
-    passed_pre_screen = []
-    
+    stage_cb("Aşama B: Ön eleme", state["best"])
+
     import sys
     src_dir = Path(__file__).resolve().parent
     if str(src_dir) not in sys.path:
         sys.path.insert(0, str(src_dir))
     import admet_filter
-    
+
+    scored_candidates = []  # (smi, qed)
     for smi in pool_list:
         if not is_reasonable(smi):
             continue
@@ -483,16 +625,20 @@ def fusion_generation(
             continue
         try:
             q = QED.qed(mol)
-        except:
+        except Exception:
             q = 0.0
-        if q < 0.3:
+        if q < qed_threshold:
             continue
-            
-        admet_res = admet_filter.lipinski_veber_filter(smi, "test")
-        if admet_res.get("pass"):
-            passed_pre_screen.append(smi)
-            
-    log_fn(f"Ön elemeyi geçen (Makul + QED>0.3 + Lipinski onaylı): {len(passed_pre_screen)}")
+        if admet_filter.lipinski_veber_filter(smi, "test").get("pass"):
+            scored_candidates.append((smi, q))
+
+    # QED'e göre (yüksekten düşüğe) sırala ve en iyileri tut.
+    scored_candidates.sort(key=lambda x: x[1], reverse=True)
+    passed_pre_screen = [smi for smi, _ in scored_candidates[:pre_screen_keep]]
+
+    log_fn(f"Ön elemeyi geçen (Makul + QED>={qed_threshold} + Lipinski): "
+           f"{len(scored_candidates)}/{len(pool_list)} · "
+           f"docking'e giren (en iyi {pre_screen_keep}): {len(passed_pre_screen)}")
     if not passed_pre_screen:
         log_fn("Ön elemeyi geçen molekül kalmadı! Tohumlarla devam ediliyor.")
         passed_pre_screen = seed_set
@@ -501,16 +647,19 @@ def fusion_generation(
     log_fn("\n--- AŞAMA C: GENETİK OPTİMİZASYON ---")
     ga_results, mode = genetic_algorithm(
         passed_pre_screen,
-        generations=5, # Daha kısa GA
-        population_size=30,
+        generations=generations,
+        population_size=population_size,
         docking_opts=docking_opts,
-        log_fn=log_fn
+        log_fn=log_fn,
+        tick_cb=tick_cb,
+        stage_cb=stage_cb,
+        n_jobs=n_jobs,
     )
     if not ga_results:
         return [], "qed_fallback"
-        
+
     top_ga = [smi for smi, sc in ga_results[:5]]
-    
+
     # AŞAMA D — SON RAFİNASYON
     log_fn("\n--- AŞAMA D: SON RAFİNASYON ---")
     refined_pool = set(top_ga)
@@ -519,16 +668,24 @@ def fusion_generation(
             mut = mutate_once(smi)
             if mut and is_reasonable(mut):
                 refined_pool.add(mut)
-                
+
     refined_list = list(refined_pool)
     log_fn(f"Rafinasyon havuzu (Top GA + küçük mutasyonlar): {len(refined_list)}")
-    
-    final_scores, final_mode = score_population(refined_list, docking_opts)
+    # total'ı rafinasyon havuzunun gerçek boyutuna göre düzelt (ETA doğrulansın).
+    state["total"] = state["done"] + len(refined_list)
+    stage_cb("Aşama D: Son rafinasyon", state["best"])
+
+    final_scores, final_mode = score_population(refined_list, docking_opts,
+                                                tick_cb=tick_cb, n_jobs=n_jobs)
     final_ranked = sorted(refined_list, key=lambda s: final_scores.get(s, 999.0))
     final_output = [(s, final_scores.get(s, 999.0)) for s in final_ranked[:5]]
-    
-    log_fn(f"\n--- FÜZYON ÖZETİ ---")
-    log_fn(f"Keşif: {len(pool_list)} → Ön eleme: {len(passed_pre_screen)} → GA (5 nesil) → Rafinasyon: {len(refined_list)} → Final: {len(final_output)} aday")
+    if final_output:
+        stage_cb("Tamamlandı", final_output[0][1])
+
+    log_fn("\n--- FÜZYON ÖZETİ ---")
+    log_fn(f"Keşif: {len(pool_list)} → Ön eleme: {len(passed_pre_screen)} → "
+           f"GA ({generations} nesil) → Rafinasyon: {len(refined_list)} → "
+           f"Final: {len(final_output)} aday")
     return final_output, final_mode
 
 
@@ -563,6 +720,59 @@ def _read_seeds(args) -> list[str]:
     return seeds
 
 
+class _ProgressWriter:
+    """Füzyon ilerlemesini atomik olarak bir JSON dosyasına yazar. Streamlit UI
+    bu dosyayı periyodik okuyarak ilerleme çubuğunu SÜRECİ YENİDEN BAŞLATMADAN
+    günceller (Sorun 1). Yazma throttle'lıdır (aşırı disk I/O olmasın)."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.start = time.time()
+        self.log: list[str] = []
+        self.state = {"status": "running", "stage": "Başlıyor",
+                      "done": 0, "total": 0, "best": None, "started_at": self.start}
+        self._last_flush = 0.0
+        self._flush(force=True)
+
+    def log_fn(self, msg):
+        print(msg, flush=True)
+        for ln in str(msg).splitlines():
+            if ln.strip():
+                self.log.append(ln)
+        self._flush()
+
+    def progress_fn(self, st):
+        self.state.update(st)
+        self._flush()
+
+    def finish(self, results, mode):
+        self.state["status"] = "done"
+        self.state["mode"] = mode
+        self.state["results"] = [[s, sc] for s, sc in results]
+        self._flush(force=True)
+
+    def error(self, msg):
+        self.state["status"] = "error"
+        self.state["error"] = str(msg)
+        self._flush(force=True)
+
+    def _flush(self, force=False):
+        now = time.time()
+        if not force and (now - self._last_flush) < 0.3:
+            return
+        self._last_flush = now
+        data = dict(self.state)
+        data["log"] = self.log[-15:]
+        data["elapsed"] = now - self.start
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        try:
+            tmp.write_text(json.dumps(data))
+            tmp.replace(self.path)
+        except Exception:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Kural tabanlı yeni molekül üretimi (model eğitimi gerektirmez)"
@@ -588,6 +798,19 @@ def main():
     parser.add_argument("--size", nargs=3, type=float, default=[20, 20, 20], metavar=("SX", "SY", "SZ"))
     parser.add_argument("--exhaustiveness", type=int, default=8)
     parser.add_argument("--workdir", default="results/ga_work", help="GA docking ara dosyaları")
+    # Füzyon motoru parametreleri (VARSAYILAN küçük/hızlı — kullanıcı büyütebilir)
+    parser.add_argument("--fusion-pool", type=int, default=FUSION_DEFAULT_POOL,
+                        help="Füzyon keşif havuzu boyutu (varsayılan hızlı: küçük)")
+    parser.add_argument("--fusion-population", type=int, default=FUSION_DEFAULT_POPULATION,
+                        help="Füzyon GA popülasyon boyutu")
+    parser.add_argument("--fusion-generations", type=int, default=FUSION_DEFAULT_GENERATIONS,
+                        help="Füzyon GA nesil sayısı")
+    parser.add_argument("--fusion-qed", type=float, default=FUSION_DEFAULT_QED,
+                        help="Füzyon ön eleme QED eşiği")
+    parser.add_argument("--n-jobs", type=int, default=None,
+                        help="Docking için paralel çekirdek sayısı (varsayılan: otomatik)")
+    parser.add_argument("--progress-file", default=None,
+                        help="İlerleme durumunun JSON olarak yazılacağı dosya (UI için)")
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -626,10 +849,31 @@ def main():
                 docking_opts=docking_opts,
                 refresh_every=args.refresh_every,
                 adaptive_mutation=args.adaptive_mutation,
-                scaffold_diversity_threshold=args.scaffold_diversity_threshold
+                scaffold_diversity_threshold=args.scaffold_diversity_threshold,
+                n_jobs=args.n_jobs,
             )
         else:
-            final, mode = fusion_generation(seeds, docking_opts=docking_opts)
+            # Füzyon: opsiyonel ilerleme dosyası (UI subprocess ile çağırınca kullanılır)
+            writer = _ProgressWriter(args.progress_file) if args.progress_file else None
+            fusion_log = writer.log_fn if writer else print
+            fusion_progress = writer.progress_fn if writer else None
+            try:
+                final, mode = fusion_generation(
+                    seeds, docking_opts=docking_opts,
+                    log_fn=fusion_log,
+                    discovery_pool=args.fusion_pool,
+                    population_size=args.fusion_population,
+                    generations=args.fusion_generations,
+                    qed_threshold=args.fusion_qed,
+                    n_jobs=args.n_jobs,
+                    progress_fn=fusion_progress,
+                )
+                if writer:
+                    writer.finish(final, mode)
+            except Exception as e:
+                if writer:
+                    writer.error(e)
+                raise
 
         if mode == "qed_fallback":
             print("\n┌─────────────────────────────────────────────────────────────┐")
