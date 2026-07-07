@@ -124,23 +124,41 @@ rule prepare_ligands:
         "python src/ligand_prep.py --input {input} --output {output}"
 
 
-# 4) AutoDock Vina ile batch docking
+# 4) GNINA docking — GPU'da Google Colab'da yapılır (Vina KALDIRILDI).
+#    Bu kural yerel docking ÇALIŞTIRMAZ; sadece Colab'dan yüklenen
+#    docking_scores.csv'yi bekler/doğrular:
+#      - Dosya zaten varsa (kullanıcı Colab'dan indirip results/<run_id>/'a
+#        yükledi)  → formatı doğrulanır ve pipeline devam eder.
+#      - Dosya yoksa → kullanıcıya Colab'da GNINA çalıştırıp sonucu buraya
+#        koyması söylenir ve pipeline burada NET bir mesajla durur.
+#    Not: Snakemake, çıktı dosyası zaten mevcut ve girdilerinden yeniyse bu
+#    kuralı hiç çalıştırmadan atlar; böylece yüklenen CSV doğrudan kullanılır.
 rule docking:
     input:
-        receptor=RECEPTOR_PDBQT,
-        ligands=LIGANDS_DIR,
-        pocket=POCKET_INFO,
+        INPUT_COPY
     output:
         DOCKING_CSV
     shell:
-        "mkdir -p {RUN_DIR} && "
-        "python src/docking.py "
-        "--receptor {input.receptor} "
-        "--ligands-dir {input.ligands} "
-        "--center {CENTER[0]} {CENTER[1]} {CENTER[2]} "
-        "--size {BOX[0]} {BOX[1]} {BOX[2]} "
-        "--exhaustiveness {EXHAUST} "
-        "--output {output}"
+        r"""
+        if [ -f "{output}" ]; then
+            echo "• docking_scores.csv bulundu — format doğrulanıyor..."
+            python src/docking.py --validate-only "{output}"
+        else
+            echo "============================================================"
+            echo "⏸️  DOCKING BEKLENİYOR — GNINA'yı Colab'da (GPU) çalıştır."
+            echo "------------------------------------------------------------"
+            echo "1. Colab'da aç:"
+            echo "   https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/gnina_colab.ipynb"
+            echo "2. Runtime > Change runtime type > GPU (T4) seç."
+            echo "3. Tüm hücreleri sırayla çalıştır (Shift+Enter)."
+            echo "4. İnen docking_scores.csv'yi ŞURAYA yükle:"
+            echo "   {output}"
+            echo "5. Bu komutu tekrar çalıştır — dosya bulununca ADMET →"
+            echo "   sıralama → dashboard otomatik devam eder."
+            echo "============================================================"
+            exit 1
+        fi
+        """
 
 
 # 5) ADMET filtresi (Lipinski/Veber veya ADMETlab)

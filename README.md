@@ -1,7 +1,12 @@
 # Receptor-Focused Drug Discovery Pipeline
 
 Açık kaynak, reseptör hedefli (structure-based) ilaç molekülü keşif pipeline'ı.
-Molekül Üretimi → AlphaFold DB → Pocket Detection → Docking (Vina) → ADMET Filtreleme
+Molekül Üretimi → AlphaFold DB → Pocket Detection → Docking (**GNINA · Colab GPU**) → ADMET Filtreleme
+
+> **Docking motoru GNINA'dır.** AutoDock Vina tamamen bırakıldı. Docking GPU'da,
+> ücretsiz Google Colab T4'ünde (`notebooks/gnina_colab.ipynb`) çalışır; sonuç
+> `docking_scores.csv` olarak Remedia'ya yüklenir ve pipeline aynen devam eder.
+> Ayrıntı: aşağıdaki [GNINA ile Docking (Colab, GPU)](#gnina-ile-docking-colab-gpu) bölümü.
 
 ## Mimari
 
@@ -21,7 +26,8 @@ Reseptör (UniProt ID / PDB ID)
 3. ligand_prep.py         → Aday moleküller (SMILES listesi / generated.smi)
         │
         ▼
-4. docking.py             → AutoDock Vina ile skorlama
+4. GNINA (Colab, GPU)     → notebooks/gnina_colab.ipynb ile skorlama
+   docking.py              → Colab çıktısı docking_scores.csv'yi doğrular
         │
         ▼
 5. admet_filter.py        → ADMETlab 3.0 API ile farmakokinetik eleme
@@ -37,8 +43,12 @@ Tüm bunları tek bir web arayüzünden yönetmek için: **`streamlit run app.py
 
 Yeni bir Codespace açıldığında `setup.sh` **otomatik** çalışır (`.devcontainer/devcontainer.json`
 içindeki `postCreateCommand` sayesinde) ve gerekli tüm araçları (Python paketleri, openbabel,
-conda/Miniconda, fpocket, vina, smina) tek seferde kurar. İlk kurulum birkaç dakika sürebilir —
+conda/Miniconda, fpocket) tek seferde kurar. İlk kurulum birkaç dakika sürebilir —
 özellikle Miniconda indirmesi yüzünden.
+
+> **Not:** Docking için Codespaces'e yerel bir docking motoru kurmana gerek yok —
+> docking GPU'da, Colab'da GNINA ile yapılır (aşağıya bkz.). Codespaces yalnızca
+> molekül üretimi, ADMET, sıralama ve dashboard için kullanılır.
 
 Eski/mevcut bir Codespace'te bu otomasyon yoksa (ör. `.devcontainer` güncellenmeden önce açılmış
 bir ortam), elle çalıştırman yeterli:
@@ -131,6 +141,73 @@ snakemake --cores 1 generate                                 # data/generated.sm
 snakemake --cores 1 --config ligands_file=data/generated.smi # dock + ADMET + sırala
 ```
 
+## GNINA ile Docking (Colab, GPU)
+
+Docking motoru **GNINA**'dır (GPU'da çalışan derin öğrenmeli docking + CNN
+rescoring). Vina tamamen bırakıldı. Docking, Codespaces yerine ücretsiz **Google
+Colab T4 GPU**'sunda yapılır; sonuç `docking_scores.csv` olarak geri yüklenir.
+Codespaces'te GPU gerekmez.
+
+Teknik bilgi gerekmez — notebook her adımda ne yapacağını sana söyler. Sırayla:
+
+1. Remedia UI'da (`streamlit run app.py`) **Adım 4**'te molekülleri üret, **Adım 5**'te
+   **"💾 Molekülleri Kaydet & Docking'e Hazırla"** butonuna bas. Sana bir
+   `run_id` verir (ör. `run_20260707_101500_a3f2`) ve `results/<run_id>/` klasörünü açar.
+2. **"Open in Colab"** linkine tıkla:
+   👉 https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/gnina_colab.ipynb
+3. Colab'da üstten **Runtime ▸ Change runtime type ▸ GPU (T4)** seç.
+4. Tüm hücreleri **yukarıdan aşağıya SIRAYLA** çalıştır (`Shift+Enter`). Bir sonrakine
+   geçmeden önce her hücrenin çıktısında **`✅`** işaretini gör.
+   - **ADIM 3**'te reseptörü (UniProt ID / dosya), pocket merkezini ve molekülleri
+     kutucuklardan seç. Molekülleri `Remedia/data/generated.smi`'den okur ya da
+     `MANUAL_SMILES` kutusuna elle yapıştırabilirsin.
+5. Son hücre otomatik olarak **`docking_scores.csv`** dosyasını bilgisayarına indirir.
+6. Bu dosyayı Codespaces'te **`results/<run_id>/`** klasörüne (adım 1'deki `run_id`)
+   `docking_scores.csv` adıyla sürükle-bırak ile yükle (üzerine yaz).
+7. Remedia UI'da **"✅ Docking Tamamlandı, Devam Et"** butonuna bas. Dosya bulununca
+   pipeline'ın kalanı (ADMET → sıralama → dashboard) **otomatik** çalışır — yeni bir
+   script çalıştırmana gerek yok, format birebir aynıdır.
+
+> **CLI tercih edersen:** Colab'dan inen dosyayı `results/<run_id>/docking_scores.csv`
+> olarak koy, sonra `snakemake --cores 1 --config ligands_file=data/generated.smi run_id=<run_id>`
+> çalıştır. Dosya mevcut olduğundan docking adımı atlanır, kalan adımlar koşar.
+
+**Çıktı formatı (ZORUNLU) —** dosya tam olarak şu iki sütunla, BAŞKA HİÇBİR EK
+SÜTUN OLMADAN olmalı:
+
+```csv
+ligand,affinity_kcal_mol
+mol_1,-8.4
+mol_2,-7.1
+```
+
+Bu format mevcut `admet_filter.py` ve `rank_report.py` tarafından doğrudan okunur.
+Doğrulamak için: `python src/docking.py --validate-only results/<run_id>/docking_scores.csv`
+
+### Sorun mu yaşıyorsun?
+
+En sık karşılaşılan 3 durum ve NET çözümleri:
+
+- **"⚠️ GPU bulunamadı!"** (ADIM 1'de)
+  Colab sana GPU vermemiş. Üstten **Runtime ▸ Change runtime type ▸ Hardware
+  accelerator ▸ GPU (T4)** seç, **Save**'e bas, sonra ADIM 1 hücresini **tekrar**
+  çalıştır. Ücretsiz T4 kotan dolduysa birkaç saat sonra tekrar dene.
+
+- **"GNINA Colab'da kurulamadı"** (ADIM 2'de)
+  Neredeyse her zaman geçici bir indirme/erişim sorunudur — GNINA binary'si büyüktür.
+  Çözüm: **ADIM 2 hücresini tekrar çalıştır** (indirme yarıda kesildiyse baştan alır).
+  Hücre, en güncel sürüm inmezse otomatik olarak bilinen kararlı sürümlere (v1.3 →
+  v1.1 → v1.0.3) düşer. Yine de olmazsa **Runtime ▸ Restart runtime** yapıp ADIM 2'yi
+  baştan çalıştır. `gnina --version` çıktısı hâlâ gelmiyorsa GPU runtime seçili
+  olmayabilir; önce ADIM 1'e dön.
+
+- **"docking_scores.csv formatı uyuşmuyor"** (Codespaces'te "Devam Et" hatası)
+  Dosya mutlaka **`ligand,affinity_kcal_mol`** başlığıyla ve **başka sütun olmadan**
+  kaydedilmeli. Notebook'un ADIM 5'i bunu otomatik doğru yazar; dosyayı elle
+  düzenlediysen fazladan sütunları sil. Ayrıca dosyanın doğru klasörde olduğundan
+  emin ol: tam olarak `results/<run_id>/docking_scores.csv` (İndirilenler klasöründe
+  kalmış olabilir). Kontrol: `python src/docking.py --validate-only results/<run_id>/docking_scores.csv`
+
 ## DiffDock ile GPU Doğrulama (Colab)
 
 Vina fiziksel bir skorlama yapar; **DiffDock** ise derin öğrenmeyle bağlanma
@@ -204,16 +281,19 @@ snakemake --cores 1
 Bu komut sırayla ve **sadece eksik/değişen adımları** çalıştırır:
 
 1. Yapı yoksa AlphaFold DB'den indirir (`fetch_structure.py`)
-2. Reseptörü docking için PDBQT'ye çevirir (openbabel)
-3. Binding pocket'ı `config.yaml`'daki merkezle sabitler (`pocket_detection.py`)
-4. Ligandları hazırlar: SMILES → 3D → PDBQT (`ligand_prep.py`)
-5. AutoDock Vina ile dockler (`docking.py`)
-6. ADMET filtresi uygular (`admet_filter.py`)
-7. Nihai sıralamayı üretir (`rank_report.py`)
-8. `dashboard.html`'i güncel sonuçlarla yeniden yazar (`generate_dashboard.py`)
+2. Binding pocket'ı `config.yaml`'daki merkezle sabitler (`pocket_detection.py`)
+3. Ligandları hazırlar: SMILES → 3D (`ligand_prep.py`)
+4. **Docking:** `results/<run_id>/docking_scores.csv` VARSA doğrulayıp kullanır
+   (`docking.py --validate-only`); YOKSA seni Colab'da GNINA çalıştırmaya yönlendirip
+   burada durur. (Docking artık GPU'da, Colab'da GNINA ile yapılır.)
+5. ADMET filtresi uygular (`admet_filter.py`)
+6. Nihai sıralamayı üretir (`rank_report.py`)
+7. `dashboard.html`'i güncel sonuçlarla yeniden yazar (`generate_dashboard.py`)
 
-Snakemake input/output dosyalarını izlediği için, örneğin sadece ligand
-listesini değiştirirsen yapı indirme adımı tekrar çalışmaz (caching).
+Yani `snakemake --cores 1` ilk çalıştırmada docking adımında **bilerek durur** ve
+sana Colab talimatını verir; `docking_scores.csv`'yi `results/<run_id>/` klasörüne
+yükleyip komutu tekrar çalıştırınca kalan adımlar otomatik koşar. Snakemake
+input/output dosyalarını izlediği için indirme/üretim adımları tekrar çalışmaz (caching).
 
 ### Parametreleri değiştirme (`config.yaml`)
 
@@ -225,7 +305,7 @@ uniprot_id: "P30405"                 # AlphaFold DB UniProt ID (örn. CypD/PPIF)
 pocket_center: [5.00, -1.02, -15.56] # docking box merkezi (x, y, z)
 box_size: [20.0, 20.0, 20.0]         # kutu boyutu (Å)
 ligands_file: "data/ligands_example.smi"
-exhaustiveness: 8                    # Vina arama yoğunluğu
+exhaustiveness: 8                    # (eski Vina parametresi — GNINA akışında kullanılmaz)
 admet_mode: "lipinski"              # veya "admetlab"
 ```
 
@@ -250,15 +330,13 @@ Snakemake akışı önerilir. Tek tek adımları elle çalıştırmak istersen
 
 ```bash
 python src/fetch_structure.py --uniprot P30405            # → data/P30405_alphafold.pdb
-obabel data/P30405_alphafold.pdb -O data/P30405_alphafold.pdbqt -xr
 python src/pocket_detection.py --pdb data/P30405_alphafold.pdb \
     --center 5.00 -1.02 -15.56 --size 20
 python src/ligand_prep.py --input data/ligands_example.smi \
     --output data/ligands_prepared
-python src/docking.py --receptor data/P30405_alphafold.pdbqt \
-    --ligands-dir data/ligands_prepared \
-    --center 5.00 -1.02 -15.56 --size 20 20 20 \
-    --output results/docking_scores.csv
+# Docking: Colab'da GNINA çalıştır (notebooks/gnina_colab.ipynb), inen
+# docking_scores.csv'yi results/<run_id>/ altına koy, sonra formatını doğrula:
+python src/docking.py --validate-only results/<run_id>/docking_scores.csv
 python src/admet_filter.py --smiles-file data/ligands_example.smi \
     --mode lipinski --output results/admet_results.csv
 python src/rank_report.py --docking results/docking_scores.csv \
