@@ -105,12 +105,11 @@ def _check_python_module(name: str) -> bool:
 
 @st.cache_data(ttl=60)
 def check_tools() -> dict[str, bool]:
+    # Docking motoru GNINA'ya (Colab, GPU) taşındı — yerel Vina artık gerekmez.
     return {
         "snakemake": _check_tool("snakemake"),
-        "vina": _check_python_module("vina"),
         "fpocket": _check_tool("fpocket"),
         "obabel": _check_tool("obabel"),
-        "smina": _check_tool("smina"),
     }
 
 
@@ -404,11 +403,23 @@ def mol_to_png_bytes(smi: str, size=(200, 160)) -> bytes | None:
 # BÖLÜM B — Pipeline çalıştırma yardımcıları
 # ============================================================================
 
+def _validate_docking_csv(csv_path) -> tuple[bool, str]:
+    """Colab'dan yüklenen docking_scores.csv'yi src/docking.py ile doğrular
+    (ligand,affinity_kcal_mol formatı). (ok, mesaj) döndürür."""
+    try:
+        from docking import validate_csv_format  # src/ sys.path'te
+        return validate_csv_format(str(csv_path))
+    except Exception as e:  # noqa: BLE001
+        return False, f"🔴 docking_scores.csv doğrulanamadı: {e}"
+
+
 def _interpret_snakemake_error(stderr: str, stdout: str) -> str:
     """Ham Snakemake hata çıktısını sade Türkçe'ye çevirir."""
     combined = (stderr + stdout).lower()
-    if "vina" in combined and ("not found" in combined or "command not found" in combined or "no module named" in combined):
-        return "🔴 Docking adımında hata: AutoDock Vina kurulu değil. Terminalde şunu çalıştır: `bash setup.sh`"
+    if "docking bekleniyor" in combined or ("docking_scores.csv" in combined and "bulun" in combined):
+        return ("🔴 Docking sonucu bulunamadı. Önce Colab'da GNINA'yı çalıştırıp inen "
+                "`docking_scores.csv`'yi `results/<run_id>/` klasörüne yükle, sonra "
+                "\"Docking Tamamlandı, Devam Et\" butonuna bas.")
     if "obabel" in combined and "not found" in combined:
         return "🔴 Ligand hazırlama adımında hata: Open Babel (obabel) kurulu değil. Terminalde şunu çalıştır: `bash setup.sh`"
     if "fpocket" in combined and "not found" in combined:
@@ -501,10 +512,8 @@ with st.expander("🔧 Araç Kurulum Durumu", expanded=False):
     cols = st.columns(len(tools))
     labels = {
         "snakemake": "Snakemake",
-        "vina": "AutoDock Vina",
         "fpocket": "fpocket",
         "obabel": "Open Babel",
-        "smina": "smina (opsiyonel)",
     }
     for (k, v), col in zip(tools.items(), cols):
         icon = "✅" if v else "❌"
@@ -534,6 +543,7 @@ ss.setdefault("known_ligands", None)          # Bölüm A
 ss.setdefault("known_ligands_msg", "")        # Bölüm A
 ss.setdefault("pipeline_running", False)      # Bölüm B
 ss.setdefault("current_run_id", None)         # Bölüm C
+ss.setdefault("gnina_run_id", None)           # GNINA/Colab docking için hazırlanan run
 ss.setdefault("pipeline_done", False)         # Bölüm B
 ss.setdefault("prepared_receptor", None)      # "Reseptörü Hazırla" butonu
 ss.setdefault("fusion_active", False)         # Füzyon ayrı süreçte çalışıyor mu
@@ -908,39 +918,26 @@ st.divider()
 # ============================================================================
 st.header("Adım 4 · Çalıştır")
 
-receptor_pdbqt = ROOT / "data" / f"{ss['uniprot']}_alphafold.pdbqt"
-use_real_docking = receptor_pdbqt.exists()
-if use_real_docking:
-    st.markdown(f"<div class='plain'>✅ Reseptör PDBQT bulundu — <b>gerçek AutoDock Vina</b> "
-                f"skorlaması kullanılacak.</div>", unsafe_allow_html=True)
-else:
-    st.markdown("<div class='plain'>ℹ️ Reseptör PDBQT (Vina girdisi) bulunamadı — skorlama "
-                "<b>QED tabanlı yedek fitness</b> ile yapılacak (Vina kurulumu tamamlanınca "
-                "otomatik gerçek docking'e geçer). Üretim ve elemeler yine tam çalışır.</div>",
-                unsafe_allow_html=True)
-
-qed_fallback_consent = True
-if not use_real_docking and method in ["genetic", "fusion"]:
-    qed_fallback_consent = st.checkbox("Reseptör seçilmedi — sonuçlar gerçek bağlanma tahmini DEĞİL, sadece ilaç-benzerlik puanı olacak. Devam?", value=False)
+st.markdown(
+    "<div class='plain'>ℹ️ Bu adım molekülleri hızlı bir <b>QED (ilaç-benzerlik) "
+    "ön skorlaması</b> ile üretir ve eler — reseptör ya da GPU gerekmez, "
+    "saniyeler sürer. <b>Gerçek bağlanma docking'i (GNINA, GPU)</b> ayrı bir "
+    "adımda, Adım 5'te Google Colab'da yapılır. Böylece Codespaces'te ağır bir "
+    "docking motoru çalıştırman gerekmez.</div>",
+    unsafe_allow_html=True,
+)
 
 if st.button("▶️ Molekülleri Üret ve Skorla", type="primary"):
-    if not use_real_docking and method in ["genetic", "fusion"] and not qed_fallback_consent:
-        st.error("Lütfen yukarıdaki uyarıyı onaylayın veya Adım 1'den bir reseptör seçin.")
-    elif not seeds:
+    if not seeds:
         st.error("En az bir geçerli tohum SMILES gir.")
     elif method == "pretrained":
         st.warning("Pretrained model plugin'i kurulu değil (opsiyonel). "
                    "random / brics / genetic yöntemlerini kullanabilirsin.")
     else:
+        # Docking motoru GNINA'ya (Colab, GPU) taşındı — üretim döngüsünde artık
+        # yerel docking ÇAĞRILMAZ. Üretim/eleme hızlı QED ön skorlaması ile yapılır;
+        # gerçek bağlanma skorları Adım 5'teki GNINA docking'inden gelir.
         docking_opts = None
-        if use_real_docking and ss["pocket"]:
-            docking_opts = {
-                "receptor": str(receptor_pdbqt),
-                "center": ss["pocket"]["center"],
-                "box_size": ss["pocket"]["box"],
-                "workdir": str(ROOT / "results" / "ui_ga_work"),
-                "exhaustiveness": cfg.get("exhaustiveness", 8),
-            }
 
         if method == "fusion":
             # Füzyonu AYRI süreçte başlat (Sorun 1). Ana thread beklemez;
@@ -1013,96 +1010,152 @@ if ss.get("fusion_active"):
 st.divider()
 
 # ============================================================================
-# ADIM 5 — PIPELINE (BÖLÜM B + C)
+# ADIM 5 — GNINA DOCKING (COLAB, GPU) + PIPELINE (BÖLÜM B + C)
+# Docking motoru GNINA'ya taşındı: docking GPU'da, Google Colab'da yapılır.
+# Bu adım artık yerel Vina docking'i ÇAĞIRMAZ; yerine kullanıcıyı Colab'a
+# yönlendirir, sonucu bekler ve dosya yüklenince pipeline'ın kalanını çalıştırır.
 # ============================================================================
-st.header("Adım 5 · Full Pipeline'ı Çalıştır")
+COLAB_NB_URL = (
+    "https://colab.research.google.com/github/mehmetg06/Remedia/blob/"
+    "main/notebooks/gnina_colab.ipynb"
+)
+
+st.header("Adım 5 · GNINA Docking (Colab, GPU) + Pipeline")
 st.markdown(
-    "<div class='plain'>Üretilen molekülleri <b>Snakemake pipeline'ından</b> geçir: "
-    "ligand hazırlama → docking → ADMET filtresi → sıralama → dashboard. "
-    "Terminal açmana gerek yok — tek butonla çalışır.</div>",
+    "<div class='plain'>Docking motoru <b>GNINA</b>'ya taşındı ve GPU'da, ücretsiz "
+    "Google Colab T4'ünde çalışır. Sıra: molekülleri kaydet → Colab'da GNINA'yı "
+    "çalıştır → inen <code>docking_scores.csv</code>'yi bu run klasörüne yükle → "
+    "\"Docking Tamamlandı, Devam Et\" butonuna bas. Gerisi (ADMET → sıralama → "
+    "dashboard) otomatik.</div>",
     unsafe_allow_html=True,
 )
 
-# ── Pipeline tetikleme ────────────────────────────────────────────────────────
 generated_smi = ROOT / "data" / "generated.smi"
 
-# "Kaydet + Pipeline Çalıştır" butonu
-col_save, col_run = st.columns([1, 2])
+# ── ADIM 5.1 · Molekülleri kaydet ve docking için run klasörü hazırla ─────────
+if not ss["results"]:
+    st.markdown(
+        "<div class='plain'>Önce Adım 4'te molekülleri üret ve skorla.</div>",
+        unsafe_allow_html=True,
+    )
+else:
+    if st.button("💾 Molekülleri Kaydet & Docking'e Hazırla", type="primary"):
+        scores = {s: a for s, a in ss["results"]}
+        mg.write_smi([s for s, _ in ss["results"]], generated_smi, scores=scores)
 
-with col_save:
-    if ss["results"]:
-        if st.button("💾 Molekülleri Kaydet (data/generated.smi)"):
-            scores = {s: a for s, a in ss["results"]}
-            mg.write_smi([s for s, _ in ss["results"]], generated_smi, scores=scores)
-            st.success(f"Kaydedildi: {generated_smi}")
-    else:
+        # Bu docking için sabit bir run_id üret ve klasörünü şimdiden oluştur ki
+        # kullanıcı Colab çıktısını TAM olarak nereye yükleyeceğini bilsin.
+        run_id = generate_run_id()
+        ss["gnina_run_id"] = run_id
+        ss["current_run_id"] = run_id
+        ss["pipeline_done"] = False
+
+        run_dir = ROOT / "results" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        import shutil as _shutil
+        _shutil.copy2(str(generated_smi), str(run_dir / "input_ligands.smi"))
+
+        st.success(f"Kaydedildi: {generated_smi} · Docking klasörü hazır: results/{run_id}/")
+
+# ── ADIM 5.2 · Colab talimat kutusu + devam butonu ───────────────────────────
+run_id = ss.get("gnina_run_id")
+if run_id:
+    run_dir = ROOT / "results" / run_id
+    docking_csv = run_dir / "docking_scores.csv"
+
+    # BÜYÜK, RENKLİ talimat kutusu — dumb-proof adımlar.
+    st.markdown(
+        f"""
+        <div style="background:linear-gradient(135deg,#0D1B2A,#10233b);
+             border:2px solid {ACCENT}; border-radius:14px; padding:22px 26px;
+             margin:14px 0; color:#E2E8F0;">
+          <div style="font-size:1.25rem; font-weight:800; color:{ACCENT};
+               margin-bottom:12px;">🧬 Sıradaki Adım: GNINA Docking (Colab'da, GPU ile)</div>
+          <ol style="font-size:0.98rem; line-height:1.9; margin:0; padding-left:22px;">
+            <li>Bu linke tıkla: <a href="{COLAB_NB_URL}" target="_blank"
+                style="color:{ACCENT}; font-weight:700;">🔗 Open in Colab (gnina_colab.ipynb)</a></li>
+            <li>Colab'da <b>Runtime ▸ Change runtime type ▸ GPU (T4)</b> seç.</li>
+            <li>Tüm hücreleri sırayla çalıştır (<b>Shift+Enter</b>).</li>
+            <li>İndirilen <code>docking_scores.csv</code>'yi ŞU klasöre yükle:
+                <br><code style="color:{ACCENT}; font-size:1.05rem;">results/{run_id}/</code></li>
+            <li>Aşağıdaki <b>"Docking Tamamlandı, Devam Et"</b> butonuna bas.</li>
+          </ol>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<div class='run-tag'>🆔 Docking çalıştırması: <b>{run_id}</b> · "
+        f"Hedef: <b>{ss['uniprot']}</b></div>",
+        unsafe_allow_html=True,
+    )
+
+    # generated.smi'yi Kopyala — kullanıcı Colab'ın MANUAL_SMILES kutusuna yapıştırabilir.
+    with st.expander("📋 generated.smi içeriğini kopyala (Colab'a elle yapıştırmak için)"):
+        smi_text = generated_smi.read_text() if generated_smi.exists() else ""
+        st.code(smi_text or "(generated.smi henüz yok)", language=None)
         st.markdown(
-            "<div class='plain'>Önce Adım 4'te molekülleri üret ve skorla.</div>",
+            "<div class='plain'>İdeal yol: Colab notebook'u repoyu <code>git clone</code> "
+            "ettiği için, üretilen molekülleri GitHub'a commit'lersen "
+            "<code>Remedia/data/generated.smi</code> otomatik güncel gelir. Commit etmek "
+            "istemezsen yukarıdaki metni kopyalayıp Colab ADIM 3'teki "
+            "<code>MANUAL_SMILES</code> kutusuna yapıştır.</div>",
             unsafe_allow_html=True,
         )
 
-with col_run:
-    # Çift-çalıştırma önlemi (Bölüm B)
+    # ── Docking Tamamlandı, Devam Et ─────────────────────────────────────────
     if ss["pipeline_running"]:
         st.warning("⏳ Pipeline zaten çalışıyor... Lütfen bekle.")
     elif not tools.get("snakemake", False):
-        st.error(
-            "❌ Snakemake kurulu değil. Terminalde şunu çalıştır:\n"
-            "`bash setup.sh`"
-        )
+        st.error("❌ Snakemake kurulu değil. Terminalde şunu çalıştır: `bash setup.sh`")
     else:
-        btn_label = "🚀 Pipeline'ı Çalıştır (Snakemake)"
-        if st.button(btn_label, type="primary", disabled=not generated_smi.exists()):
-            if not generated_smi.exists():
-                st.error("Önce molekülleri kaydet (sol taraftaki butona bas).")
-            else:
-                # run_id üret (Bölüm C)
-                run_id = generate_run_id()
-                ss["current_run_id"] = run_id
-                ss["pipeline_running"] = True
-                ss["pipeline_done"] = False
-
-                run_dir = ROOT / "results" / run_id
-                run_dir.mkdir(parents=True, exist_ok=True)
-
-                # Ligand dosyasını run klasörüne kopyala
-                import shutil as _shutil
-                _shutil.copy2(str(generated_smi), str(run_dir / "input_ligands.smi"))
-
-                cmd = [
-                    "snakemake", "--cores", "1",
-                    "--config",
-                    f"ligands_file={generated_smi}",
-                    f"run_id={run_id}",
-                    "--rerun-incomplete",
-                    "--nolock",
-                ]
-
-                st.markdown(
-                    f"<div class='run-tag'>🆔 Çalıştırma: <b>{run_id}</b> · "
-                    f"Hedef: <b>{ss['uniprot']}</b></div>",
-                    unsafe_allow_html=True,
+        if st.button("✅ Docking Tamamlandı, Devam Et", type="primary"):
+            if not docking_csv.exists():
+                st.error(
+                    f"📄 Dosya henüz yüklenmedi: `results/{run_id}/docking_scores.csv`\n\n"
+                    "Colab'dan inen `docking_scores.csv`'yi bu klasöre sürükle-bırak ile "
+                    "yükle (VS Code / Codespaces dosya gezgininden), sonra tekrar bu "
+                    "butona bas."
                 )
-
-                log_ph = st.empty()
-                status_ph = st.empty()
-
-                with st.spinner("Pipeline çalışıyor..."):
-                    rc, stdout, stderr = _run_snakemake_live(cmd, log_ph, status_ph)
-
-                ss["pipeline_running"] = False
-
-                if rc == 0:
-                    ss["pipeline_done"] = True
-                    # latest_run.txt güncelle
-                    (ROOT / "results" / "latest_run.txt").write_text(run_id)
-                    st.success(f"✅ Pipeline tamamlandı! Çalıştırma: **{run_id}**")
-                    st.balloons()
+            else:
+                # Yüklenen dosyanın formatını doğrula (ligand,affinity_kcal_mol).
+                ok, msg = _validate_docking_csv(docking_csv)
+                if not ok:
+                    st.error(msg)
                 else:
-                    friendly = _interpret_snakemake_error(stderr, stdout)
-                    st.error(friendly)
-                    with st.expander("🔍 Ham hata detayı"):
-                        st.code(stderr[-3000:] if len(stderr) > 3000 else stderr, language=None)
+                    st.success(msg)
+                    ss["pipeline_running"] = True
+                    ss["pipeline_done"] = False
+
+                    # Pipeline'ın kalanını çalıştır: docking_scores.csv zaten mevcut
+                    # olduğundan docking kuralı atlanır; ADMET → sıralama → dashboard koşar.
+                    cmd = [
+                        "snakemake", "--cores", "1",
+                        "--config",
+                        f"ligands_file={generated_smi}",
+                        f"run_id={run_id}",
+                        "--rerun-incomplete",
+                        "--nolock",
+                    ]
+
+                    log_ph = st.empty()
+                    status_ph = st.empty()
+                    with st.spinner("Pipeline çalışıyor (ADMET → sıralama → dashboard)..."):
+                        rc, stdout, stderr = _run_snakemake_live(cmd, log_ph, status_ph)
+
+                    ss["pipeline_running"] = False
+
+                    if rc == 0:
+                        ss["pipeline_done"] = True
+                        (ROOT / "results" / "latest_run.txt").write_text(run_id)
+                        st.success(f"✅ Pipeline tamamlandı! Çalıştırma: **{run_id}**")
+                        st.balloons()
+                    else:
+                        friendly = _interpret_snakemake_error(stderr, stdout)
+                        st.error(friendly)
+                        with st.expander("🔍 Ham hata detayı"):
+                            st.code(stderr[-3000:] if len(stderr) > 3000 else stderr, language=None)
 
 st.divider()
 
