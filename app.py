@@ -151,6 +151,67 @@ def run_dir_path(run_id: str) -> Path:
 
 
 # ============================================================================
+# BÖLÜM C.1 — data/generated.smi'yi GitHub'a otomatik commit + push
+# ----------------------------------------------------------------------------
+# Amaç: elle kopyala-yapıştırı TAMAMEN ortadan kaldırmak. Streamlit molekülleri
+# data/generated.smi'ye yazdıktan sonra bu dosyayı git ile commit + push eder;
+# böylece Colab notebook'u `git pull` ile aynı dosyayı OTOMATİK alır. Tek doğru
+# kaynak GitHub reposudur. Push başarısız olursa UI KIRILMAZ — sade bir uyarı
+# döner ve kullanıcı yine de manuel yola başvurabilir.
+# ============================================================================
+
+def git_sync_generated_smi(run_id: str) -> tuple[bool, str]:
+    """data/generated.smi'yi commit + push eder. (başarılı?, mesaj) döndürür.
+
+    - Codespaces içinde GitHub kimliği zaten authenticate olduğundan push
+      sorunsuz çalışmalı.
+    - Değişiklik yoksa (dosya aynı) commit atlanır ama yine başarı sayılır.
+    - Hata durumunda exception FIRLATMAZ; UI'yi kırmamak için (False, mesaj)
+      döner.
+    """
+    smi_rel = "data/generated.smi"
+
+    def _run(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args], cwd=str(ROOT),
+            capture_output=True, text=True, timeout=120,
+        )
+
+    try:
+        # 1) Dosyayı sahnele. (.gitignore'da olmadığı için -f gerekmez ama
+        #    güvenli tarafta kalmak için açıkça ekliyoruz.)
+        add = _run(["add", smi_rel])
+        if add.returncode != 0:
+            return False, f"git add başarısız: {add.stderr.strip() or add.stdout.strip()}"
+
+        # 2) Sahnelenmiş bir değişiklik var mı? Yoksa commit atla.
+        diff = _run(["diff", "--cached", "--quiet", "--", smi_rel])
+        if diff.returncode == 0:
+            # Değişiklik yok — yine de remote'ta güncel olduğundan emin olmak
+            # için push denemeye gerek yok; dosya zaten push edilmiş demektir.
+            return True, "generated.smi zaten güncel (yeni commit gerekmedi)."
+
+        # 3) Commit.
+        commit = _run(["commit", "-m", f"generated.smi güncellendi: {run_id}"])
+        if commit.returncode != 0:
+            return False, f"git commit başarısız: {commit.stderr.strip() or commit.stdout.strip()}"
+
+        # 4) Push (mevcut branch'e).
+        push = _run(["push"])
+        if push.returncode != 0:
+            return False, (
+                "Commit oluşturuldu ama push başarısız oldu "
+                f"(yetki/ağ sorunu olabilir): {push.stderr.strip() or push.stdout.strip()}"
+            )
+
+        return True, "generated.smi commit + push edildi (GitHub güncel)."
+    except subprocess.TimeoutExpired:
+        return False, "git işlemi zaman aşımına uğradı (ağ sorunu olabilir)."
+    except Exception as e:  # noqa: BLE001 — UI'yi asla kırma
+        return False, f"git senkronizasyonu sırasında beklenmeyen hata: {e}"
+
+
+# ============================================================================
 # FÜZYON — ayrı süreç (subprocess) + ilerleme dosyası (Sorun 1)
 # Füzyon/GA, Streamlit'in ana script akışından TAMAMEN AYRILIR: ayrı bir
 # subprocess olarak (molecule_generator.py --method fusion) çalışır. Ana thread
@@ -1057,6 +1118,22 @@ else:
 
         st.success(f"Kaydedildi: {generated_smi} · Docking klasörü hazır: results/{run_id}/")
 
+        # ── generated.smi'yi GitHub'a otomatik push et ──────────────────────
+        # Böylece Colab notebook'u `git pull` ile bu dosyayı OTOMATİK alır;
+        # kullanıcının Colab'a hiçbir şey KOPYALAMASINA gerek kalmaz.
+        with st.spinner("generated.smi GitHub'a gönderiliyor (Colab otomatik alsın diye)..."):
+            pushed, push_msg = git_sync_generated_smi(run_id)
+        if pushed:
+            st.success(f"🔄 {push_msg} Colab `git pull` ile otomatik güncel gelecek.")
+        else:
+            st.warning(
+                "⚠️ generated.smi otomatik GitHub'a gönderilemedi:\n\n"
+                f"> {push_msg}\n\n"
+                "Docking'e devam edebilirsin ama Colab dosyayı otomatik almayabilir. "
+                "Aşağıdaki '📋 generated.smi içeriğini kopyala' kutusunu yedek olarak "
+                "kullanabilirsin."
+            )
+
 # ── ADIM 5.2 · Colab talimat kutusu + devam butonu ───────────────────────────
 run_id = ss.get("gnina_run_id")
 if run_id:
@@ -1091,16 +1168,19 @@ if run_id:
         unsafe_allow_html=True,
     )
 
-    # generated.smi'yi Kopyala — kullanıcı Colab'ın MANUAL_SMILES kutusuna yapıştırabilir.
-    with st.expander("📋 generated.smi içeriğini kopyala (Colab'a elle yapıştırmak için)"):
+    # generated.smi otomatik GitHub'a push edildiği için Colab dosyayı `git pull`
+    # ile OTOMATİK alır — normalde bu kutuya hiç bakman gerekmez. Sadece otomatik
+    # push başarısız olduysa YEDEK olarak buradan içeriği kopyalayabilirsin.
+    with st.expander("📋 (Yedek) generated.smi içeriği — otomatik push çalışmazsa"):
         smi_text = generated_smi.read_text() if generated_smi.exists() else ""
         st.code(smi_text or "(generated.smi henüz yok)", language=None)
         st.markdown(
-            "<div class='plain'>İdeal yol: Colab notebook'u repoyu <code>git clone</code> "
-            "ettiği için, üretilen molekülleri GitHub'a commit'lersen "
-            "<code>Remedia/data/generated.smi</code> otomatik güncel gelir. Commit etmek "
-            "istemezsen yukarıdaki metni kopyalayıp Colab ADIM 3'teki "
-            "<code>MANUAL_SMILES</code> kutusuna yapıştır.</div>",
+            "<div class='plain'>Normal akışta buna GEREK YOK: molekülleri kaydedince "
+            "<code>data/generated.smi</code> otomatik olarak GitHub'a commit + push "
+            "edilir ve Colab notebook'u <code>git pull</code> ile aynı dosyayı otomatik "
+            "alır. Sadece yukarıda push başarısız uyarısı gördüysen, bu metni kopyalayıp "
+            "Colab'daki opsiyonel <b>“Farklı moleküller dene”</b> kod hücresine (üçlü "
+            "tırnak arasına) yapıştırabilirsin.</div>",
             unsafe_allow_html=True,
         )
 

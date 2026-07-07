@@ -1,0 +1,6 @@
+# SMILES  isim   (Remedia UI "Molekülleri Kaydet" butonu bu dosyayı üzerine yazıp GitHub'a push eder)
+# Bu başlangıç içeriği yalnızca örnektir; Streamlit ilk kaydında güncellenecek.
+CC(=O)Oc1ccccc1C(=O)O  gen_0000
+CN1C=NC2=C1C(=O)N(C(=O)N2C)C  gen_0001
+CC(C)Cc1ccc(cc1)C(C)C(=O)O  gen_0002
+O=C1CCC(=O)N1  gen_0003

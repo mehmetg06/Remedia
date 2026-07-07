@@ -10,7 +10,10 @@ data/verify/
 data/**/*.pdbqt
 data/**/*.sdf
 data/pocket_info.txt
-data/generated.smi
+# NOT: data/generated.smi ARTIK repo'da tutulur (git ile takip edilir).
+# Streamlit UI molekülleri kaydedince bu dosyayı commit+push eder; Colab
+# notebook'u git pull ile otomatik günceller. Tek doğru kaynak: GitHub reposu.
+# Bu sayede elle kopyala-yapıştır tamamen ortadan kalkar.
 results/
 
 # Snakemake çalışma meta verileri
