@@ -1,6 +1,6 @@
-# SMILES  isim   (Remedia UI "Molekülleri Kaydet" butonu bu dosyayı üzerine yazıp GitHub'a push eder)
-# Bu başlangıç içeriği yalnızca örnektir; Streamlit ilk kaydında güncellenecek.
-CC(=O)Oc1ccccc1C(=O)O  gen_0000
-CN1C=NC2=C1C(=O)N(C(=O)N2C)C  gen_0001
-CC(C)Cc1ccc(cc1)C(C)C(=O)O  gen_0002
-O=C1CCC(=O)N1  gen_0003
+# SMILES  isim   (molecule_generator.py tarafından üretildi)
+CC(C(=O)O)c1ccccc1-c1ccc(CC(=O)O)cc1  gen_0000  # affinity=-10.840
+CC(C(=O)O)c1ccccc1-c1ccccc1CC(=O)O  gen_0001  # affinity=-10.840
+CC(C(=O)O)c1ccccc1-c1ccccc1C(C)C(=O)O  gen_0002  # affinity=-10.816
+CC(C(=O)O)c1ccc(-c2ccccc2C(C)C(=O)O)cc1  gen_0003  # affinity=-10.816
+CC(C(=O)O)c1cccnc1-c1ccc(CC(=O)O)cc1  gen_0004  # affinity=-10.811
