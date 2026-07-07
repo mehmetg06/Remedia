@@ -131,6 +131,67 @@ snakemake --cores 1 generate                                 # data/generated.sm
 snakemake --cores 1 --config ligands_file=data/generated.smi # dock + ADMET + sırala
 ```
 
+## DiffDock ile GPU Doğrulama (Colab)
+
+Vina fiziksel bir skorlama yapar; **DiffDock** ise derin öğrenmeyle bağlanma
+pozunu tahmin edip bağımsız bir **güven skoru** verir. İki farklı yöntem de bir
+molekülü güçlü buluyorsa ona daha çok güvenebilirsin. DiffDock GPU ister; bu yüzden
+onu Google Colab'ın **ücretsiz T4 GPU**'sunda çalıştırıp sonucu Codespaces'e geri
+getiriyoruz. Codespaces'te GPU'ya gerek yok.
+
+Tek yapman gereken, aşağıdaki numaralı adımları sırayla izlemek — teknik bilgi
+gerekmez, notebook her adımda ne yapacağını sana söyler:
+
+1. **`notebooks/diffdock_colab.ipynb`** dosyasını GitHub'da aç.
+2. **"Open in Colab"** linkine tıkla:
+   👉 https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/diffdock_colab.ipynb
+3. Colab açılınca üstten **Runtime ▸ Change runtime type ▸ Hardware accelerator ▸ GPU (T4)** seç.
+4. Yukarıdan aşağıya **HER HÜCREYİ SIRAYLA** çalıştır (`Shift+Enter`). Bir sonrakine
+   geçmeden önce her hücrenin çıktısında **`✅`** işaretini gör.
+5. Son hücre otomatik olarak **`diffdock_results.csv`** dosyasını bilgisayarına indirir.
+6. Bu dosyayı Codespaces'teki **`Remedia/results/`** klasörüne sürükle-bırak ile yükle.
+7. Codespaces terminalinde şunu çalıştır:
+   ```bash
+   python src/merge_diffdock_results.py
+   ```
+8. Çıktıda **"GÜÇLÜ ADAY"** olarak işaretlenen moleküller en güvenilir sonuçlarındır
+   (hem Vina hem DiffDock güçlü bulmuştur). Detaylı tablo: `results/final_comparison.csv`.
+
+Birleştirme mantığı — `genel_guven_durumu` sütunu:
+
+| Durum | Anlamı |
+|-------|--------|
+| **GÜÇLÜ ADAY** | Hem Vina (≤ −7.0 kcal/mol) hem DiffDock (güven ≥ 0) güçlü buldu |
+| **TEK YÖNTEMLE DESTEKLENİYOR** | Sadece bir yöntem güçlü buldu — temkinli ol |
+| **ZAYIF ADAY** | İkisi de zayıf — muhtemelen elenmeli |
+
+> **Not:** `merge_diffdock_results.py`, `results/validated_candidates.csv` dosyasındaki
+> `dogrulanmis_skor`u (yoksa `ilk_skor`) `vina_affinity` olarak kullanır. Vina dosyası
+> yoksa script kırılmaz; sadece DiffDock skorlarını raporlar.
+
+### Sorun mu yaşıyorsun?
+
+En sık karşılaşılan 3 durum ve NET çözümleri:
+
+- **"⚠️ GPU bulunamadı!"** (ADIM 1'de)
+  Colab sana GPU vermemiş. Üstten **Runtime ▸ Change runtime type ▸ Hardware
+  accelerator ▸ GPU (T4)** seç, **Save**'e bas, sonra ADIM 1 hücresini **tekrar**
+  çalıştır. Ücretsiz T4 kotan dolduysa birkaç saat sonra tekrar dene.
+
+- **"torch_geometric / torch_scatter kurulum hatası"** (ADIM 2'de)
+  Neredeyse her zaman torch↔CUDA sürüm uyuşmazlığındandır. ADIM 2 hücresi, PyG
+  tekerleklerini (`torch_scatter`, `torch_sparse`, `torch_cluster`) senin torch
+  sürümüne göre otomatik seçer. Yine de patlarsa: **Runtime ▸ Restart runtime** yap
+  ve ADIM 2'yi baştan çalıştır (bazı paketler ancak yeniden başlatınca doğru yüklenir).
+  Hâlâ olmuyorsa ADIM 2'nin başındaki `torch=... cuda=...` çıktısına bak — CUDA `cpu`
+  görünüyorsa GPU runtime seçili değildir; önce ADIM 1'e dön.
+
+- **"diffdock_results.csv bulunamadı"** (Codespaces'te `merge_diffdock_results.py`)
+  Colab'dan indirdiğin dosyayı **doğru klasöre** koymadın. Dosyanın tam olarak
+  `Remedia/results/diffdock_results.csv` yolunda olduğundan emin ol (İndirilenler
+  klasöründe kalmış olabilir). Dosyayı VS Code / Codespaces'te `results/` klasörüne
+  sürükle-bırak ile yükle, sonra komutu tekrar çalıştır.
+
 ## Hızlı Başlangıç — Tek Komut (CLI)
 
 Tüm pipeline artık **Snakemake** ile otomatik çalışıyor. Parametreler
