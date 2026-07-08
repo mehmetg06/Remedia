@@ -8,18 +8,30 @@ ADMET Filtreleme → Sıralama → Görsel Sonuç.
 
 ---
 
-## 🚀 Nasıl çalıştırılır (tek yol, 4 adım)
+## 🚀 Nasıl çalıştırılır (tek yol, 5 adım)
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/remedia_pipeline.ipynb)
 
 1. Yukarıdaki **“Open in Colab”** rozetine tıkla — notebook Colab'da açılır.
 2. **Runtime ▸ Change runtime type ▸ Hardware accelerator ▸ GPU (T4)** seç.
-3. **Runtime ▸ Run all**.
-4. En alttaki hücrede sonuç tablosunu, molekül çizimlerini ve Google Drive'a
+3. **Runtime ▸ Run all**. İlk **Hücre 0** (Miniconda kurulumu) **kernel'i yeniden
+   başlatır** — bu NORMAL, endişelenme.
+4. Kernel yeniden başladıktan sonra **`Run all`'ı TEKRAR çalıştır**; bu sefer
+   Miniconda zaten kurulu olduğu için restart olmadan baştan sona akar.
+5. En alttaki hücrede sonuç tablosunu, molekül çizimlerini ve Google Drive'a
    kaydedilen dosyaları gör.
 
 Hepsi bu kadar. **Hiç dosya taşıma, hiç git senkronizasyonu, hiç kopyala-yapıştır
 yok** — her şey Colab'da olur.
+
+> **Parametreler kod içine elle yazılmaz:** UniProt ID, üretim yöntemi
+> (füzyon/genetik/BRICS/random), molekül sayısı gibi seçimler ilgili hücrelerin
+> üstündeki **Colab form kutularından** (dropdown/kaydırıcı) yapılır. Yalnızca
+> çok satırlı SMILES tohum listesi kod içindeki üçlü-tırnaklı `MANUAL_SEEDS`
+> değişkenine yapıştırılır (form kutuları tek satırlıktır).
+
+> **Not:** Notebook fpocket'i conda ile kurar ve gerekli **conda Terms of
+> Service'i otomatik kabul eder**.
 
 > Doğrudan bağlantı:
 > `https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/remedia_pipeline.ipynb`
@@ -31,17 +43,18 @@ GPU seçmeden **Hücre 5 (docking) çalışmaz**. Notebook'u açar açmaz
 **Runtime ▸ Change runtime type ▸ GPU (T4)** yapmayı unutma. AutoDock Vina
 tamamen bırakılmıştır.
 
-## 🧬 Notebook ne yapıyor? (8 hücre)
+## 🧬 Notebook ne yapıyor? (Hücre 0 + 8 hücre)
 
 Notebook yukarıdan aşağıya çalıştırılır; her hücrenin üstünde ne yaptığını, ne
 kadar süreceğini ve devam etmeden önce neyi görmen gerektiğini yazan bir not var.
 
 | # | Hücre | Ne yapar |
 |---|---|---|
-| 1 | **Kurulum** | GNINA (GPU binary), fpocket, RDKit, meeko + Python paketleri kurar; `src/`'yi import yoluna ekler; GPU'yu kontrol eder. |
-| 2 | **Hedef** | `UNIPROT_ID` (varsayılan `P00918`, Karbonik Anhidraz II) için AlphaFold yapısını **REST API'den** indirir; fpocket ile en druggable cebi bulup merkezini hesaplar. |
+| 0 | **Miniconda** | fpocket'i conda ile kurabilmek için `condacolab` ile Miniconda kurar. **Kernel'i yeniden başlatır** — restart sonrası `Run all`'ı tekrar çalıştır. İkinci turda zaten kurulu olduğu için restart olmaz. |
+| 1 | **Kurulum** | GNINA (GPU binary), **fpocket'i conda ile** (conda ToS'u otomatik kabul ederek), RDKit, meeko + Python paketleri kurar; `src/`'yi import yoluna ekler; GPU'yu kontrol eder. |
+| 2 | **Hedef** | `UNIPROT_ID` (form kutusundan; varsayılan `P00918`, Karbonik Anhidraz II) için AlphaFold yapısını **REST API'den** indirir; fpocket ile en druggable cebi bulup merkezini hesaplar (fpocket yoksa geometrik merkeze düşer). |
 | 3 | **Tohum moleküller** | `known_ligands.py` ile ChEMBL/PubChem'den bilinen inhibitörleri çeker; bulamazsa `MANUAL_SEEDS` (üçlü-tırnaklı SMILES metni) kullanılır. |
-| 4 | **Molekül üret** | `molecule_generator.py` füzyon motoruyla yeni aday moleküller üretir. |
+| 4 | **Molekül üret** | `molecule_generator.py` ile yeni aday moleküller üretir; yöntem **form kutusundan** seçilir (füzyon / genetik / BRICS / random). |
 | 5 | **GNINA Docking (GPU)** | Her molekülü 3D'ye hazırlayıp GNINA (CNN rescoring) ile dockler; `ligand, affinity_kcal_mol` DataFrame'i üretir. |
 | 6 | **ADMET** | `admet_filter.py` ile Lipinski/Veber filtresi uygular. |
 | 7 | **Sırala** | `rank_report.py` ile docking + ADMET'i birleşik sıralar. |
