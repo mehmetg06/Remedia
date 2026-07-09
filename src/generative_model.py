@@ -30,6 +30,7 @@ Kullanım (Python API):
     smiles = generate_with_reinvent(num_molecules=30, output_path="data/generated_reinvent.smi")
 """
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -241,15 +242,38 @@ def generate_with_reinvent(
             _build_sampling_toml(prior_path, request_n, output_csv, device, seed)
         )
 
-        reinvent_bin = shutil.which("reinvent")
-        cmd = [reinvent_bin] if reinvent_bin else [sys.executable, "-m", "reinvent.Reinvent"]
+        # TensorFlow ve PyTorch'un aynı anda CUDA'ya erişip segfault'a (çökme) neden
+        # olmasını önlemek için (özellikle Colab'da), REINVENT4'ü doğrudan değil,
+        # aracı bir betikle çalıştırıyoruz. Bu betik önce TensorFlow'un GPU'ya erişimini
+        # kapatır (PyTorch çalışmaya devam eder).
+        wrapper_path = tmpdir / "run_reinvent_wrapper.py"
+        wrapper_path.write_text(
+            "import os\n"
+            "os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'\n"
+            "try:\n"
+            "    import tensorflow as tf\n"
+            "    tf.config.set_visible_devices([], 'GPU')\n"
+            "except Exception:\n"
+            "    pass\n"
+            "import runpy\n"
+            "import sys\n"
+            "if __name__ == '__main__':\n"
+            "    runpy.run_module('reinvent.Reinvent', run_name='__main__')\n"
+        )
+
+        cmd = [sys.executable, str(wrapper_path)]
         cmd += ["-l", str(log_path), "-d", device]
         if seed is not None:
             cmd += ["-s", str(int(seed))]
         cmd += [str(toml_path)]
 
         log_fn(f"• REINVENT4 sampling çalıştırılıyor (device={device}, n={request_n})...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Ekstra güvenlik için TF'in tüm belleği almasını engelleyen env değişkeni
+        env = os.environ.copy()
+        env["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if result.returncode != 0:
             log_fn(result.stdout[-3000:])
             log_fn(result.stderr[-3000:])
