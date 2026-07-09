@@ -248,15 +248,9 @@ def generate_with_reinvent(
         # kapatır (PyTorch çalışmaya devam eder).
         wrapper_path = tmpdir / "run_reinvent_wrapper.py"
         wrapper_path.write_text(
-            "import os\n"
-            "os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'\n"
-            "try:\n"
-            "    import tensorflow as tf\n"
-            "    tf.config.set_visible_devices([], 'GPU')\n"
-            "except Exception:\n"
-            "    pass\n"
-            "import runpy\n"
             "import sys\n"
+            "sys.modules['tensorflow'] = None\n"
+            "import runpy\n"
             "if __name__ == '__main__':\n"
             "    runpy.run_module('reinvent.Reinvent', run_name='__main__')\n"
         )
