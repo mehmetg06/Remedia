@@ -1,114 +1,84 @@
 # Remedia — Reseptör Odaklı İlaç Keşif Pipeline'ı
 
-Açık kaynak, reseptör hedefli (structure-based) ilaç molekülü keşif pipeline'ı —
-**tamamen tek bir Google Colab notebook'unda**, baştan sona çalışır.
+Google Colab üzerinde çalışan, reseptör hedefli açık kaynak ilaç keşif prototipi:
 
-Molekül Üretimi → AlphaFold DB → Pocket Detection → **GNINA (GPU) Docking** →
-ADMET Filtreleme → Sıralama → Görsel Sonuç.
-
----
-
-## 🚀 Nasıl çalıştırılır (tek yol, 5 adım)
+**Molekül üretimi → AlphaFold DB → pocket detection → GNINA GPU docking → drug-likeness filtresi → sıralama**
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/remedia_pipeline.ipynb)
 
-1. Yukarıdaki **“Open in Colab”** rozetine tıkla — notebook Colab'da açılır.
-2. **Runtime ▸ Change runtime type ▸ Hardware accelerator ▸ GPU (T4)** seç.
-3. **Runtime ▸ Run all**. İlk **Hücre 0** (Miniconda kurulumu) **kernel'i yeniden
-   başlatır** — bu NORMAL, endişelenme.
-4. Kernel yeniden başladıktan sonra **`Run all`'ı TEKRAR çalıştır**; bu sefer
-   Miniconda zaten kurulu olduğu için restart olmadan baştan sona akar.
-5. En alttaki hücrede sonuç tablosunu, molekül çizimlerini ve Google Drive'a
-   kaydedilen dosyaları gör.
+## Hızlandırılmış varsayılan akış
 
-Hepsi bu kadar. **Hiç dosya taşıma, hiç git senkronizasyonu, hiç kopyala-yapıştır
-yok** — her şey Colab'da olur.
+Notebook günlük geliştirme için hafif ayarlarla açılır:
 
-> **Parametreler kod içine elle yazılmaz:** UniProt ID, üretim yöntemi
-> (füzyon/genetik/BRICS/random), molekül sayısı gibi seçimler ilgili hücrelerin
-> üstündeki **Colab form kutularından** (dropdown/kaydırıcı) yapılır. Yalnızca
-> çok satırlı SMILES tohum listesi kod içindeki üçlü-tırnaklı `MANUAL_SEEDS`
-> değişkenine yapıştırılır (form kutuları tek satırlıktır).
+- `GENERATE_N = 10`
+- `TOP_FRACTION = 0.10`
+- `ACCURACY_PROFILE = "balanced"`
+- `INSTALL_REINVENT4 = False`
+- `RUN_BENCHMARK = False`
 
-> **Not:** Notebook fpocket'i conda ile kurar ve gerekli **conda Terms of
-> Service'i otomatik kabul eder**.
+GNINA artık ligand başına ayrı süreç açmaz. Bütün ligandlar FAST aşamasında tek bir çoklu SDF dosyasına yazılır ve **tek GNINA sürecinde** docklanır. Seçilen en iyi adaylar da ACCURATE aşamasında ikinci bir batch süreçte çalışır. Normal iki aşamalı tarama böylece toplamda en fazla iki GNINA süreci kullanır.
 
-> Doğrudan bağlantı:
-> `https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/remedia_pipeline.ipynb`
+Ligandların 3D SDF dosyaları yalnızca bir kez hazırlanır. Accurate aşaması FAST aşamasında hazırlanan aynı konformasyonları yeniden kullanır.
 
-## ⚠️ GPU ZORUNLUDUR
+## Accuracy profilleri
 
-Docking motoru **GNINA**'dır ve **GPU'da** çalışır (Colab'ın ücretsiz T4'ü yeter).
-GPU seçmeden **Hücre 5 (docking) çalışmaz**. Notebook'u açar açmaz
-**Runtime ▸ Change runtime type ▸ GPU (T4)** yapmayı unutma. AutoDock Vina
-tamamen bırakılmıştır.
+| Profil | FAST | ACCURATE | Kullanım |
+|---|---|---|---|
+| `balanced` | exhaustiveness 4, 1 pose, fast CNN | exhaustiveness 8, 3 pose, varsayılan CNN ensemble | Günlük Colab çalışmaları |
+| `final` | exhaustiveness 4, 1 pose, fast CNN | exhaustiveness 16, 9 pose, varsayılan CNN ensemble | Son doğrulama |
 
-## 🧬 Notebook ne yapıyor? (Hücre 0 + 8 hücre)
+`final` profili belirgin biçimde daha yavaştır; yalnızca nihai aday setinde kullanılması önerilir.
 
-Notebook yukarıdan aşağıya çalıştırılır; her hücrenin üstünde ne yaptığını, ne
-kadar süreceğini ve devam etmeden önce neyi görmen gerektiğini yazan bir not var.
+## Pocket cache
 
-| # | Hücre | Ne yapar |
-|---|---|---|
-| 0 | **Miniconda** | fpocket'i conda ile kurabilmek için `condacolab` ile Miniconda kurar. **Kernel'i yeniden başlatır** — restart sonrası `Run all`'ı tekrar çalıştır. İkinci turda zaten kurulu olduğu için restart olmaz. |
-| 1 | **Kurulum** | GNINA (GPU binary), **fpocket'i conda ile** (conda ToS'u otomatik kabul ederek), RDKit, meeko + Python paketleri kurar; `src/`'yi import yoluna ekler; GPU'yu kontrol eder. |
-| 2 | **Hedef** | `UNIPROT_ID` (form kutusundan; varsayılan `P00918`, Karbonik Anhidraz II) için AlphaFold yapısını **REST API'den** indirir; fpocket ile en druggable cebi bulup merkezini hesaplar (fpocket yoksa geometrik merkeze düşer). |
-| 3 | **Tohum moleküller** | `known_ligands.py` ile ChEMBL/PubChem'den bilinen inhibitörleri çeker; bulamazsa `MANUAL_SEEDS` (üçlü-tırnaklı SMILES metni) kullanılır. |
-| 3.5 | **REINVENT4 kurulumu (opsiyonel)** | `generative_model.py`, [REINVENT4](https://github.com/MolecularAI/REINVENT4)'ü klonlar/kurar ve halka açık, önceden eğitilmiş prior ağırlığını indirir — yalnızca `pretrained` yöntemini kullanacaksan gerekir; TEK SEFERLİK ve atlanabilir (form kutusu). |
-| 4 | **Molekül üret** | Yeni aday moleküller üretir; yöntem **form kutusundan** seçilir: füzyon / genetik / BRICS / random (`molecule_generator.py`, tohum gerektirir) veya **pretrained** (`generative_model.py`, tohum GEREKTİRMEZ). |
-| 5 | **GNINA Docking (GPU)** | `gnina_engine.py` ile iki-aşamalı docking: TÜM adaylar önce **FAST** modda hızlıca elenir, en iyi top-N/top-% **ACCURATE** modda yeniden docklanır (form kutusundan `sadece_fast`/`sadece_accurate` de seçilebilir). Nihai skorlar ACCURATE'ten gelir; `ligand, affinity_kcal_mol, skor_kaynagi, ...` DataFrame'i üretir. |
-| 5.5 | **(Opsiyonel) Benchmark** | `gnina_engine.benchmark_fast_vs_accurate` ile aynı molekülleri hem FAST hem ACCURATE dockleyip gerçek süre/skor farkını ölçer — atlanabilir. |
-| 6 | **ADMET** | `admet_filter.py` ile Lipinski/Veber filtresi uygular. |
-| 7 | **Sırala** | `rank_report.py` ile docking + ADMET'i birleşik sıralar. |
-| 8 | **Sonuç** | En iyi adayları tablo + RDKit 2D çizimlerle gösterir; tüm sonuçları Google Drive'a tarihli klasöre kaydeder (kalıcılık). |
+Pocket merkezi, UniProt ID anahtarıyla şu dosyada saklanır:
 
-## 📦 Bu repoda ne var?
-
-```
-notebooks/remedia_pipeline.ipynb   ← ANA VE TEK AKIŞ (Colab, GPU)
-src/                               ← notebook'un import ettiği çekirdek modüller
-  fetch_structure.py       AlphaFold/PDB'den yapı indirme (REST API)
-  pocket_detection.py      fpocket ile bağlanma cebi tespiti
-  known_ligands.py         ChEMBL/PubChem'den bilinen ligandlar
-  molecule_generator.py    kural tabanlı yeni molekül üretimi (füzyon/GA)
-  generative_model.py      REINVENT4 (önceden eğitilmiş prior) ile üretim
-  ligand_prep.py           SMILES → 3D konformasyon
-  gnina_engine.py          GNINA docking motoru — fast/accurate mod + iki-aşamalı pipeline
-  admet_filter.py          Lipinski/Veber ADMET filtresi
-  rank_report.py           docking + ADMET birleşik sıralaması
-data/                              ← örnek girdi molekülleri
-tests/                             ← birim testleri (python -m unittest discover tests)
-legacy/                            ← eski/opsiyonel arayüzler (aşağıya bak)
+```text
+/content/drive/MyDrive/remedia_setup/pocket_cache.json
 ```
 
-## 🗂️ Eski arayüzler (`legacy/`) — opsiyonel
+Yeni bir hedef ilk kez kullanıldığında fpocket gerekebilir ve Miniconda kernel'i bir kez yeniden başlatabilir. Aynı hedef sonraki çalıştırmalarda cache'den okunur; Miniconda ve fpocket kurulumu tamamen atlanır.
 
-Önceki Streamlit UI, Snakemake akışı, Codespaces devcontainer'ı ve eski Colab
-notebook'ları **artık ana akış değildir**; [`legacy/`](legacy/) klasörüne taşındı.
-Silinmediler — referans için oradalar ama aktif bakımı yapılmıyor. Ayrıntı:
-[`legacy/README.md`](legacy/README.md).
+Geometrik merkez fallback sonucu güvenilir bir pocket olmadığı için cache'e yazılmaz.
 
-## 🧪 Molekül üretim yöntemleri (Hücre 4)
+## Notebook kullanımı
 
-| Yöntem | Tohum gerekli mi? | Nasıl üretir? |
-|---|---|---|
-| **fusion** (varsayılan) | Evet | Geniş keşif → ön eleme → genetik optimizasyon → rafinasyon (`molecule_generator.py`, RDKit kural tabanlı). |
-| **genetic** | Evet | Saf genetik algoritma. |
-| **brics** | Evet | BRICS fragman rekombinasyonu. |
-| **random** | Evet | Rastgele atom/grup mutasyonu. |
-| **pretrained (REINVENT4)** | **Hayır** | Tohum molekül gerektirmeden, önceden eğitilmiş bir yapay zeka modeliyle (RNN tabanlı [REINVENT4](https://github.com/MolecularAI/REINVENT4) "prior"ı) sıfırdan ilaç-benzeri molekül üretir. **Reseptöre özel değildir** — model hiçbir reseptörü "bilmez", yalnızca genel kimyasal olarak makul, çeşitli moleküller üretir; üretilen moleküller sonradan GNINA docking + ADMET ile test edilir. Reseptöre özel eğitim (fine-tuning/RL) **yapılmaz**. |
+1. Colab'da **Runtime → Change runtime type → T4 GPU** seç.
+2. Notebook'u `Run all` ile çalıştır.
+3. Yeni hedefte Miniconda kernel'i yeniden başlatırsa `Run all`ı bir kez daha çalıştır.
+4. Günlük denemelerde `balanced`, nihai doğrulamada `final` kullan.
+5. REINVENT4 yalnızca `pretrained` yöntemi seçilecekse açılmalıdır.
+6. Benchmark yalnızca hız/skor karşılaştırması gerektiğinde açılmalıdır.
 
-`pretrained` seçilirse Hücre 3.5 (veya Hücre 4'ün kendisi, ilk kullanımda) REINVENT4'ü
-GitHub'dan kurar ve AstraZeneca'nın Zenodo'da yayınladığı halka açık prior ağırlığını
-indirir — ~3-5 GB indirme, ilk seferde birkaç dakika sürer, sonrasında atlanır.
+## Repository yapısı
 
-## 🎯 Farklı bir hedef denemek
+```text
+notebooks/remedia_pipeline.ipynb  Ana Colab akışı
+src/gnina_engine.py               Batch GNINA motoru ve accuracy profilleri
+src/molecule_generator.py         Fusion, genetic, BRICS ve random üretim
+src/generative_model.py           Opsiyonel REINVENT4 sampling
+src/fetch_structure.py            AlphaFold/PDB yapı indirme
+src/pocket_detection.py           fpocket entegrasyonu
+src/admet_filter.py               Lipinski/Veber drug-likeness filtresi
+src/rank_report.py                Docking ve filtre sonuçlarını sıralama
+tests/test_gnina_engine.py        GPU gerektirmeyen birim testleri
+legacy/                           Eski Streamlit/Snakemake/notebook akışları
+```
 
-Notebook'un **Hücre 2**'sinde `UNIPROT_ID`'yi değiştir (ör. `P30405` — CypD).
-Yapı, cep merkezi ve bilinen ligandlar o hedefe göre otomatik güncellenir. Başka
-hiçbir şeye dokunman gerekmez.
+## Testler
 
-## 📄 Lisans
+GNINA binary'si veya GPU gerektirmeden:
 
-AGPL-3.0 — özgürce fork'la, katkı ver; ancak türev çalışmalar (ağ üzerinden
-sunulan servisler dahil) de açık kaynak kalmak zorunda. Bkz. [LICENSE](LICENSE).
+```bash
+python -m unittest discover -s tests -v
+```
+
+Testler balanced/final profil bayraklarını, top %10 seçimini, stale-output korumasını, tek modda bir batch çağrısını ve iki aşamalı akışta toplam iki batch çağrısını doğrular.
+
+## Bilimsel kullanım notu
+
+Remedia bir araştırma ve ön eleme prototipidir. Docking skoru tek başına bağlanma veya etkinlik kanıtı değildir. Son adaylar deneysel yapı, reseptör hazırlama, uygun kontroller ve laboratuvar doğrulamasıyla değerlendirilmelidir.
+
+## Lisans
+
+AGPL-3.0-or-later. Ayrıntılar için [LICENSE](LICENSE).
