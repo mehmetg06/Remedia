@@ -65,6 +65,14 @@ def _prior_path(install_dir: Path) -> Path:
     return install_dir / "priors" / ZENODO_PRIOR_FILENAME
 
 
+def _default_drive_cache_dir() -> Path | None:
+    """Colab'da Google Drive mount edilmişse (notebook Hücre -1) GNINA/fpocket
+    ile AYNI kurulum önbellek klasörünü döner; mount yoksa None (normal
+    indirme/kurulum akışına düşülür)."""
+    drive_root = Path("/content/drive/MyDrive")
+    return (drive_root / "remedia_setup") if drive_root.is_dir() else None
+
+
 def is_reinvent_ready(install_dir: Path | None = None) -> bool:
     """Kurulumun TAMAMLANMIŞ olup olmadığını kontrol eder: repo var mı, `reinvent`
     komutu çalışıyor mu, prior ağırlığı indirilmiş mi. Notebook'un 'zaten
@@ -87,6 +95,7 @@ def install_reinvent(
     install_dir: Path | str | None = None,
     log_fn=print,
     skip_if_ready: bool = True,
+    drive_cache_dir: Path | str | None = None,
 ) -> Path:
     """REINVENT4'ü GitHub'dan klonlar, pip ile kurar ve resmi Zenodo prior
     ağırlığını indirir. TEK SEFERLİK olacak şekilde idempotenttir: her adım
@@ -95,8 +104,25 @@ def install_reinvent(
 
     Reseptöre özel HİÇBİR eğitim/fine-tuning burada YAPILMAZ — yalnızca genel
     amaçlı, önceden eğitilmiş prior indirilir.
+
+    Drive kalıcılığı (GNINA/fpocket ile aynı `remedia_setup/` klasörü):
+    `drive_cache_dir` verilmezse Colab'da Drive mount edilmişse otomatik
+    algılanır. Prior ağırlığı (tek dosya, ~50-100MB) GNINA binary'siyle
+    birebir aynı mantıkla kopyalanır. `pip install -e .` adımı (~3-5GB,
+    PyTorch/CUDA bağımlılıkları) için ise ham `site-packages` kopyalama
+    YAPILMAZ — CUDA native uzantıları belirli bir sürücü/Python sürümüne
+    bağlı olduğundan bu kırılgan olurdu. Bunun yerine pip'in kendi wheel
+    önbelleğini (`PIP_CACHE_DIR`) Drive'a yönlendiriyoruz: ilk seferden sonra
+    wheel'ler ağdan değil Drive'dan gelir, kurulumun kendisi yine pip'in
+    normal (ve güvenli) uyumluluk kontrolüyle yapılır.
     """
     install_dir = Path(install_dir) if install_dir else _default_install_dir()
+    if drive_cache_dir is None:
+        drive_cache_dir = _default_drive_cache_dir()
+    elif drive_cache_dir:
+        drive_cache_dir = Path(drive_cache_dir)
+    if drive_cache_dir:
+        drive_cache_dir.mkdir(parents=True, exist_ok=True)
 
     if skip_if_ready and is_reinvent_ready(install_dir):
         log_fn(f"• REINVENT4 zaten kurulu ve hazır: {install_dir}")
@@ -112,30 +138,48 @@ def install_reinvent(
     else:
         log_fn(f"• REINVENT4 reposu zaten var: {install_dir}")
 
-    # --- 2) Python paketi olarak kur -------------------------------------
+    # --- 2) Python paketi olarak kur (pip wheel önbelleği Drive'da) ------
     if shutil.which("reinvent") is None and not _reinvent_importable():
-        log_fn("• REINVENT4 pip ile kuruluyor (bu birkaç dakika sürebilir, ~3-5GB indirme)...")
+        env = os.environ.copy()
+        if drive_cache_dir:
+            pip_cache = drive_cache_dir / "pip_cache"
+            env["PIP_CACHE_DIR"] = str(pip_cache)
+            log_fn(f"• REINVENT4 pip ile kuruluyor (pip wheel önbelleği Drive'da: "
+                   f"{pip_cache} — ilk seferden sonra indirme atlanır)...")
+        else:
+            log_fn("• REINVENT4 pip ile kuruluyor (bu birkaç dakika sürebilir, ~3-5GB indirme)...")
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "-q", "-e", str(install_dir)],
-            check=True,
+            check=True, env=env,
         )
         # REINVENT4'ün pyproject.toml'unda EKSİK bir bağımlılık: TensorBoard
         # raporlama kodu (reinvent/runmodes/utils/plot.py) scipy import eder
         # ama scipy pyproject'te tanımlı DEĞİL -> onsuz `reinvent` komutu bile
         # çalışmıyor (ImportError). Test sırasında bulundu; elle tamamlıyoruz.
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "scipy"], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "scipy"], check=True, env=env)
     else:
         log_fn("• REINVENT4 paketi zaten kurulu")
 
-    # --- 3) Önceden eğitilmiş prior ağırlığını indir ---------------------
+    # --- 3) Önceden eğitilmiş prior ağırlığını indir (once Drive onbellek) -
     # NOT: Bu, REINVENT4'ün "de novo" (LibInvent/LinkInvent değil, düz
     # Reinvent) genel priorudur — HERHANGİ bir reseptöre yönlendirilmemiştir.
     prior_path = _prior_path(install_dir)
-    if not prior_path.exists():
+    prior_cache = (drive_cache_dir / ZENODO_PRIOR_FILENAME) if drive_cache_dir else None
+    if prior_path.exists():
+        log_fn(f"• Prior ağırlığı zaten indirilmiş: {prior_path}")
+    elif prior_cache and prior_cache.exists():
+        log_fn(f"• Prior ağırlığı Drive önbellekten KOPYALANIYOR (indirme atlanır): {prior_cache}")
+        prior_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(prior_cache, prior_path)
+    else:
         log_fn("• Önceden eğitilmiş prior ağırlığı Zenodo'dan indiriliyor...")
         _download_prior(prior_path, log_fn=log_fn)
-    else:
-        log_fn(f"• Prior ağırlığı zaten indirilmiş: {prior_path}")
+        if prior_cache and prior_path.exists():
+            try:
+                shutil.copy(prior_path, prior_cache)
+                log_fn(f"• Prior ağırlığı Drive'a KOPYALANDI (bir sonraki çalıştırma için): {prior_cache}")
+            except Exception as e:
+                log_fn(f"⚠️ Prior ağırlığı Drive'a kaydedilemedi: {e}")
 
     if not prior_path.exists():
         raise RuntimeError(
@@ -209,6 +253,7 @@ def generate_with_reinvent(
     seed: int | None = None,
     prefix: str = "reinvent",
     log_fn=print,
+    drive_cache_dir: Path | str | None = None,
 ) -> list[str]:
     """REINVENT4'ün önceden eğitilmiş prior modelinden `num_molecules` adet
     YENİ molekül örnekler — TOHUM MOLEKÜL GEREKTİRMEZ, reseptöre özel eğitim
@@ -216,10 +261,14 @@ def generate_with_reinvent(
     edilemeyenler elenir). Sonuç `molecule_generator.write_smi` ile AYNI
     formatta bir .smi dosyasına yazılır.
 
+    `drive_cache_dir`: `install_reinvent`'e geçilir (bkz. orada) — Drive
+    kurulum önbelleği için verilmezse Colab'da otomatik algılanır.
+
     Returns:
         Geçerli, kanonik SMILES listesi (docking'e girmeye hazır).
     """
-    install_dir = install_reinvent(install_dir=install_dir, log_fn=log_fn)
+    install_dir = install_reinvent(install_dir=install_dir, log_fn=log_fn,
+                                    drive_cache_dir=drive_cache_dir)
     prior_path = _prior_path(install_dir)
 
     if device is None:
