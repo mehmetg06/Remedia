@@ -42,8 +42,7 @@ if [[ ! -x "${ENV_PREFIX}/bin/python" ]]; then
   log "Conda ortamı oluşturuluyor"
   "${MICROMAMBA}" create -y -p "${ENV_PREFIX}" -f "${ROOT_DIR}/environment.yml"
 else
-  log "Mevcut Conda ortamı güncelleniyor"
-  "${MICROMAMBA}" install -y -p "${ENV_PREFIX}" -f "${ROOT_DIR}/environment.yml"
+  log "Mevcut Conda ortamı kullanılacak. Yeniden kurmak için REMEDIA_RECREATE_ENV=1 kullan."
 fi
 "${MICROMAMBA}" clean --all --yes >/dev/null 2>&1 || true
 
