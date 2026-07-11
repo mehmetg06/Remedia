@@ -5,27 +5,95 @@ GPU üzerinde çalışan, reseptör hedefli açık kaynak ilaç keşif prototipi
 **Molekül üretimi → AlphaFold DB → pocket detection → GNINA GPU docking → drug-likeness filtresi → sıralama**
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mehmetg06/Remedia/blob/main/notebooks/remedia_pipeline.ipynb)
+[![Local GPU Notebook](https://img.shields.io/badge/Local-NVIDIA_GPU-2E7D32)](notebooks/remedia_local.ipynb)
 [![Open Modal Notebooks](https://img.shields.io/badge/Modal-Open_Notebook-7F5AF0)](https://modal.com/notebooks)
 [![Run on RunPod](https://img.shields.io/badge/RunPod-Deploy_GPU-673DE6?logo=runpod&logoColor=white)](https://console.runpod.io/deploy)
 
-## Modal — ücretsiz kredi ve harcama korumalı akış
+## Yerel bilimsel çalışma istasyonu
 
-Modal sürümü iki şekilde kullanılabilir.
+Yerel akış şu sistemler içindir:
 
-### En kolay: Modal Notebooks
+- Linux x86_64 + NVIDIA GPU
+- Windows 11 + WSL2 + NVIDIA GPU
+- NVIDIA GPU düğümü bulunan üniversite/HPC Linux sistemi
+- En az 8 GB RAM ve yaklaşık 20 GB boş disk önerilir
+
+macOS ve NVIDIA GPU bulunmayan bilgisayarlarda mevcut CUDA/GNINA akışı yerel
+çalışmaz; Colab, Modal veya RunPod kullanılmalıdır.
+
+### Otomatik kurulum
+
+```bash
+git clone https://github.com/mehmetg06/Remedia.git
+cd Remedia
+bash scripts/setup_local.sh
+```
+
+Script kendi izole micromamba ortamını `.remedia-tools/env` altında oluşturur,
+`environment.yml` bağımlılıklarını kurar, fpocket ve GNINA'yı doğrular, Jupyter
+kernel'ini kaydeder ve GPU gerektirmeyen testleri çalıştırır.
+
+Kurulum sonunda ekrana yazılan Jupyter komutunu çalıştır. Notebook:
+
+```text
+notebooks/remedia_local.ipynb
+```
+
+Yerel sonuçlar ve cache:
+
+```text
+local_workspace/Remedia_results/
+local_workspace/remedia_cache/pocket_cache.json
+```
+
+### Conda ortamını elle kurma
+
+Python bağımlılıklarını ayrı yönetmek isteyen kullanıcılar:
+
+```bash
+conda env create -f environment.yml
+conda activate remedia-local
+```
+
+Bu yöntem Python/fpocket ortamını kurar. GNINA binary'si ve NVIDIA sürücüsü yine
+gereklidir; tam otomatik yol için `scripts/setup_local.sh` önerilir.
+
+### Docker ile yerel GPU
+
+Docker hostunda NVIDIA Container Toolkit ve çalışan bir NVIDIA sürücüsü olmalıdır.
+
+```bash
+docker build -f Dockerfile.local -t remedia-local .
+docker run --rm --gpus all \
+  -p 127.0.0.1:8888:8888 \
+  -v "$PWD/local_workspace:/workspace/Remedia/local_workspace" \
+  remedia-local
+```
+
+Tarayıcıda `http://127.0.0.1:8888` açılır. Jupyter token:
+
+```text
+remedia
+```
+
+Docker imajı CUDA runtime, GNINA, fpocket, RDKit ve JupyterLab'i içerir. Sonuçlar
+hosttaki `local_workspace/` klasöründe kalır.
+
+## Modal — form kullanan GPU akışı
 
 1. [Modal Notebooks](https://modal.com/notebooks) sayfasında yeni notebook oluştur.
 2. [`notebooks/remedia_modal.ipynb`](notebooks/remedia_modal.ipynb) dosyasını indirip yükle.
-3. Compute panelinden GPU olarak **L4** seç.
+3. Compute panelinden **L4**, **4 CPU** ve **8 GiB RAM** seç.
 4. Kalıcı sonuç için `remedia-data` adlı Volume oluşturup `/mnt/remedia-data` yoluna bağla.
-5. **Run all** seç.
+5. Notebook'taki tek kod hücresini çalıştır.
+6. Açılan formdan reseptör, UniProt ID, molekül sayısı ve doğruluk profilini seç.
+7. **Remedia'yı Başlat** düğmesine bas.
 
 Notebook eksik Python paketlerini, fpocket'i, GNINA'yı ve Remedia kodunu kendi
 kendine kurar. Volume bağlıysa araç cache'i, pocket cache ve sonuçlar sonraki
-oturumlarda korunur. Volume bağlı değilse notebook yine çalışır ancak kernel
-kapanınca dosyalar silinir.
+oturumlarda korunur.
 
-### Daha hızlı tekrar açılış: özel Modal imajı
+Özel Modal imajı ile daha hızlı tekrar açılış:
 
 ```bash
 git clone https://github.com/mehmetg06/Remedia.git
@@ -33,15 +101,6 @@ cd Remedia
 python -m pip install modal
 python -m modal setup
 modal run modal/remedia_modal.py --timeout-minutes 60
-```
-
-Bu komut L4 GPU'lu, token korumalı JupyterLab bağlantısı açar. Oturum varsayılan
-olarak 60 dakika sonra otomatik kapanır; izin verilen üst sınır 240 dakikadır.
-
-L40S kullanmak için:
-
-```bash
-REMEDIA_MODAL_GPU=L40S modal run modal/remedia_modal.py --timeout-minutes 60
 ```
 
 Ayrıntılar: [`modal/README.md`](modal/README.md)
@@ -62,8 +121,7 @@ RDKit ve JupyterLab'i önceden içerir; Pod açıldığında doğrudan
 - Volume mount: `/workspace`
 - Jupyter token: `remedia`
 
-Özel imaj kullanmadan resmi RunPod PyTorch template'iyle başlatmak için Web
-Terminal'de:
+Özel imaj kullanmadan resmi RunPod PyTorch template'iyle Web Terminal'de:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mehmetg06/Remedia/main/runpod/bootstrap.sh | bash
@@ -73,7 +131,7 @@ Ayrıntılar: [`runpod/README.md`](runpod/README.md)
 
 ## Hızlandırılmış varsayılan akış
 
-Notebook günlük geliştirme için hafif ayarlarla açılır:
+Notebook'lar günlük geliştirme için hafif ayarlarla açılır:
 
 - `TOP_FRACTION = 0.10`
 - `ACCURACY_PROFILE = "balanced"`
@@ -102,6 +160,7 @@ kullanılması önerilir.
 
 ```text
 Colab:  /content/drive/MyDrive/remedia_setup/pocket_cache.json
+Local:  local_workspace/remedia_cache/pocket_cache.json
 Modal:  /mnt/remedia-data/remedia_cache/pocket_cache.json
 RunPod: /workspace/remedia_cache/pocket_cache.json
 ```
@@ -110,6 +169,14 @@ Yeni hedef ilk kez kullanıldığında fpocket çalışır. Aynı hedef sonraki
 çalıştırmalarda cache'den okunur.
 
 ## Notebook kullanımı
+
+### Yerel
+
+1. `bash scripts/setup_local.sh` çalıştır.
+2. `notebooks/remedia_local.ipynb` dosyasını `Remedia Local (GPU)` kernel'iyle aç.
+3. İlk hücrede UniProt ID ve deney parametrelerini ayarla.
+4. **Run All Cells** seç.
+5. `local_workspace/Remedia_results/` altındaki `final_ranking.csv` dosyasını incele.
 
 ### Colab
 
@@ -122,7 +189,7 @@ Yeni hedef ilk kez kullanıldığında fpocket çalışır. Aynı hedef sonraki
 1. Modal Notebook'ta L4 GPU seç.
 2. `remedia_modal.ipynb` dosyasını yükle.
 3. Mümkünse `/mnt/remedia-data` yoluna Volume bağla.
-4. **Run all** seç ve idle shutdown değerini düşük bırak.
+4. Form hücresini çalıştır ve yeşil başlatma düğmesine bas.
 
 ### RunPod
 
@@ -134,8 +201,12 @@ Yeni hedef ilk kez kullanıldığında fpocket çalışır. Aynı hedef sonraki
 
 ```text
 notebooks/remedia_pipeline.ipynb  Colab akışı
-notebooks/remedia_modal.ipynb     Modal Notebook akışı
+notebooks/remedia_local.ipynb     Yerel Linux/WSL2 NVIDIA GPU akışı
+notebooks/remedia_modal.ipynb     Modal form akışı
 notebooks/remedia_runpod.ipynb    RunPod Jupyter akışı
+scripts/setup_local.sh            Yerel ortam, GNINA ve kernel kurulumu
+environment.yml                   Conda/micromamba bağımlılıkları
+Dockerfile.local                  Yerel NVIDIA Docker/Jupyter imajı
 modal/remedia_modal.py            Modal L4/L40S Jupyter başlatıcısı
 modal/requirements.txt            Modal özel imaj bağımlılıkları
 runpod/Dockerfile                 GNINA/fpocket hazır RunPod imajı
@@ -149,6 +220,7 @@ src/admet_filter.py               Lipinski/Veber drug-likeness filtresi
 src/rank_report.py                Docking ve filtre sonuçlarını sıralama
 tests/test_gnina_engine.py        GNINA motoru testleri
 tests/test_modal_assets.py        Modal dosyaları ve notebook syntax testleri
+tests/test_local_assets.py        Yerel kurulum dosyaları ve notebook testleri
 legacy/                           Eski akışlar
 ```
 
@@ -160,11 +232,22 @@ GNINA binary'si veya GPU gerektirmeden:
 python -m unittest discover -s tests -v
 ```
 
+Yerel kurulum scriptinin shell syntax kontrolü:
+
+```bash
+bash -n scripts/setup_local.sh
+```
+
 ## Bilimsel kullanım notu
 
 Remedia bir araştırma ve ön eleme prototipidir. Docking skoru tek başına bağlanma
 veya etkinlik kanıtı değildir. Son adaylar deneysel yapı, reseptör hazırlama,
-uygun kontroller ve laboratuvar doğrulamasıyla değerlendirilmelidir.
+pozitif/negatif kontroller, alternatif scoring yöntemleri ve laboratuvar
+doğrulamasıyla değerlendirilmelidir.
+
+Tekrarlanabilir çalışmalar için kullanılan commit SHA'sı, UniProt ID, pocket
+koordinatları, GNINA profili, rastgele tohumlar ve çıktı dosyaları deney kaydına
+eklenmelidir.
 
 ## Lisans
 
