@@ -1,26 +1,27 @@
 # Remedia on Modal
 
-Modal için iki çalışma yolu vardır.
+## En kolay yol: form kullanan Modal Notebook
 
-## 1. En kolay: Modal Notebooks
-
-Bu yol bilgisayarda terminal gerektirmez.
+Bu yol bilgisayar terminali ve kod satırı düzenleme gerektirmez.
 
 1. `https://modal.com/notebooks` sayfasını aç.
-2. Yeni notebook oluştur ve `notebooks/remedia_modal.ipynb` dosyasını yükle.
-3. **Compute** panelinden GPU olarak `L4` seç.
-4. Kalıcı dosya istiyorsan Files panelinden `remedia-data` adlı Volume oluştur ve
+2. `notebooks/remedia_modal.ipynb` dosyasını yükle.
+3. **Compute** panelinden `L4`, `4 CPU`, `8 GiB RAM` seç.
+4. Kalıcı dosya istiyorsan `remedia-data` adlı Volume oluştur ve
    `/mnt/remedia-data` yoluna bağla.
-5. **Run all** seç.
+5. Notebook'taki tek kod hücresini çalıştır.
+6. Açılan formdan reseptörü, UniProt ID'yi, molekül sayısını ve doğruluk profilini seç.
+7. **Remedia'yı Başlat** düğmesine bas.
+
+Formda hazır reseptör seçenekleri, özel UniProt ID kutusu, yöntem seçimi,
+molekül sayısı, balanced/final doğruluk profili ve gelişmiş docking ayarları
+bulunur. Kod satırı değiştirmek gerekmez.
 
 Notebook eksik Python paketlerini, fpocket'i, GNINA'yı ve Remedia kodunu kendi
 kendine kurar. Volume bağlıysa kurulum cache'i, pocket cache ve sonuçlar sonraki
 oturumlarda korunur.
 
-Modal Notebooks varsayılan olarak boşta 10 dakika sonra kernel'i durdurabilir.
-Bu ayarı düşük bırakmak gereksiz ücret riskini azaltır.
-
-## 2. Daha hızlı tekrar açılış: özel Modal imajı
+## Daha hızlı tekrar açılış: özel Modal imajı
 
 Bilgisayar terminalinde:
 
@@ -70,6 +71,8 @@ Ardından Modal Notebook'un Compute/Image bölümünde `remedia-modal` uygulamas
 ## Harcama güvenliği
 
 - Varsayılan GPU `L4`.
+- Formun varsayılan doğruluk profili `balanced`.
+- Benchmark varsayılan olarak kapalıdır.
 - Jupyter başlatıcısı varsayılan 60 dakika, en fazla 240 dakika çalışır.
 - Hosted Modal Notebook'ta idle shutdown değerini 10 dakika bırak.
 - Modal dashboard'dan Workspace ve Environment Budget belirle.
