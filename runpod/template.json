@@ -1,0 +1,19 @@
+{
+  "category": "NVIDIA",
+  "containerDiskInGb": 20,
+  "dockerEntrypoint": [],
+  "dockerStartCmd": [],
+  "env": {
+    "JUPYTER_PASSWORD": "remedia",
+    "REMEDIA_SYNC_CODE": "1"
+  },
+  "imageName": "ghcr.io/mehmetg06/remedia-runpod:latest",
+  "isPublic": true,
+  "isServerless": false,
+  "name": "Remedia Jupyter GPU",
+  "ports": [
+    "8888/http"
+  ],
+  "volumeInGb": 20,
+  "volumeMountPath": "/workspace"
+}
