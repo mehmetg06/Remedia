@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG GNINA_VERSION=v1.3
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH=/opt/remedia-env/bin:${PATH} \
+    REMEDIA_HOME=/workspace/Remedia \
+    REMEDIA_WORKSPACE=/workspace/Remedia/local_workspace \
+    GNINA_PATH=/usr/local/bin/gnina
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bzip2 ca-certificates curl git libgomp1 tar \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+      | tar -xj -C /usr/local/bin --strip-components=1 bin/micromamba
+
+COPY environment.yml /tmp/remedia-environment.yml
+RUN micromamba create -y -p /opt/remedia-env -f /tmp/remedia-environment.yml \
+    && micromamba clean --all --yes
+
+RUN curl --fail --location --retry 3 \
+      "https://github.com/gnina/gnina/releases/download/${GNINA_VERSION}/gnina" \
+      --output /usr/local/bin/gnina \
+    && chmod 0755 /usr/local/bin/gnina \
+    && /usr/local/bin/gnina --version \
+    && fpocket --help >/dev/null
+
+WORKDIR /workspace/Remedia
+COPY . /workspace/Remedia
+RUN mkdir -p local_workspace/Remedia_results local_workspace/remedia_cache
+
+EXPOSE 8888
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--ServerApp.token=", "--ServerApp.password=", "notebooks/remedia_local.ipynb"]
