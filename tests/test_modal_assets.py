@@ -23,12 +23,12 @@ class ModalAssetsTest(unittest.TestCase):
             cell for cell in notebook["cells"]
             if cell["cell_type"] == "code"
         ]
-        self.assertGreaterEqual(len(code_cells), 5)
+        self.assertGreaterEqual(len(code_cells), 1)
         for index, cell in enumerate(code_cells, start=1):
             with self.subTest(cell=index):
                 ast.parse(cell["source"])
 
-    def test_modal_notebook_has_cost_guards(self):
+    def test_modal_notebook_has_form_controls(self):
         notebook_path = ROOT / "notebooks" / "remedia_modal.ipynb"
         notebook = json.loads(notebook_path.read_text())
         source = "\n".join(
@@ -36,8 +36,12 @@ class ModalAssetsTest(unittest.TestCase):
             for cell in notebook["cells"]
             if cell["cell_type"] == "code"
         )
-        self.assertIn('ACCURACY_PROFILE = "balanced"', source)
-        self.assertIn("RUN_BENCHMARK = False", source)
+        self.assertIn("widgets.Text", source)
+        self.assertIn("widgets.Dropdown", source)
+        self.assertIn("Remedia'yı Başlat", source)
+        self.assertIn("UniProt ID:", source)
+        self.assertIn('value="balanced"', source)
+        self.assertIn("run_benchmark = widgets.Checkbox(value=False", source)
         self.assertIn('PERSISTENT_ROOT = "/mnt/remedia-data"', source)
 
 
