@@ -19,10 +19,7 @@ class ModalAssetsTest(unittest.TestCase):
         notebook_path = ROOT / "notebooks" / "remedia_modal.ipynb"
         notebook = json.loads(notebook_path.read_text())
         self.assertEqual(notebook["nbformat"], 4)
-        code_cells = [
-            cell for cell in notebook["cells"]
-            if cell["cell_type"] == "code"
-        ]
+        code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
         self.assertGreaterEqual(len(code_cells), 1)
         for index, cell in enumerate(code_cells, start=1):
             with self.subTest(cell=index):
@@ -32,9 +29,7 @@ class ModalAssetsTest(unittest.TestCase):
         notebook_path = ROOT / "notebooks" / "remedia_modal.ipynb"
         notebook = json.loads(notebook_path.read_text())
         source = "\n".join(
-            cell["source"]
-            for cell in notebook["cells"]
-            if cell["cell_type"] == "code"
+            cell["source"] for cell in notebook["cells"] if cell["cell_type"] == "code"
         )
         self.assertIn("widgets.Text", source)
         self.assertIn("widgets.Dropdown", source)
@@ -43,6 +38,20 @@ class ModalAssetsTest(unittest.TestCase):
         self.assertIn('value="balanced"', source)
         self.assertIn("run_benchmark = widgets.Checkbox(value=False", source)
         self.assertIn('PERSISTENT_ROOT = "/mnt/remedia-data"', source)
+
+    def test_modal_import_bootstraps_cuda_runtime(self):
+        notebook = json.loads(
+            (ROOT / "notebooks" / "remedia_modal_import.ipynb").read_text()
+        )
+        source = "\n".join(
+            "".join(cell["source"]) if isinstance(cell["source"], list) else cell["source"]
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code"
+        )
+        ast.parse(source)
+        self.assertIn("nvidia-cusparse-cu12", source)
+        self.assertIn("libcusparse.so.12", source)
+        self.assertIn("LD_LIBRARY_PATH", source)
 
 
 if __name__ == "__main__":
