@@ -12,7 +12,7 @@ GNINA_VERSION="${GNINA_VERSION:-v1.3}"
 log() { printf '\n\033[1;36m[Remedia]\033[0m %s\n' "$*"; }
 fail() { printf '\n\033[1;31m[Hata]\033[0m %s\n' "$*" >&2; exit 1; }
 
-[[ "$(uname -s)" == "Linux" ]] || fail "Bu kurulum Linux veya WSL2 içindir. Windows'ta WSL2, macOS'ta Docker yolunu kullan."
+[[ "$(uname -s)" == "Linux" ]] || fail "Bu kurulum Linux veya WSL2 içindir. macOS'ta mevcut CUDA/GNINA akışı yerel çalışmaz; Colab, Modal veya RunPod kullan."
 [[ "$(uname -m)" == "x86_64" ]] || fail "Hazır GNINA binary'si için x86_64 işlemci gerekiyor."
 
 for command in curl tar; do
@@ -20,7 +20,7 @@ for command in curl tar; do
 done
 
 if [[ "${REMEDIA_SKIP_GPU_CHECK:-0}" != "1" ]]; then
-  command -v nvidia-smi >/dev/null 2>&1 || fail "nvidia-smi bulunamadı. NVIDIA sürücüsünü kur veya Docker yolunu kullan."
+  command -v nvidia-smi >/dev/null 2>&1 || fail "nvidia-smi bulunamadı. NVIDIA sürücüsünü kur veya NVIDIA destekli Docker yolunu kullan."
   nvidia-smi >/dev/null 2>&1 || fail "NVIDIA GPU erişilemiyor."
 fi
 
