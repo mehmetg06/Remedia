@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, median
 
+from receptor_prep import ReceptorPreparationError, prepare_receptor_pdbqt
+
 MODE_FAST = "fast"
 MODE_ACCURATE = "accurate"
 PROFILE_BALANCED = "balanced"
@@ -32,6 +34,10 @@ MODE_PROFILES = {
     },
 }
 MODE_FLAGS = MODE_PROFILES[PROFILE_BALANCED]
+
+
+class GninaScreeningError(RuntimeError):
+    """Raised when GNINA produces no scientifically usable score."""
 
 
 @dataclass
@@ -89,7 +95,7 @@ def parse_affinity(out_path, stdout):
         except Exception:
             pass
     for line in (stdout or "").splitlines():
-        match = re.match(r"\s*1\s+(-?\d+\.\d+)", line)
+        match = re.match(r"\s*1\s+(-?\d+(?:\.\d+)?)", line)
         if match:
             return float(match.group(1))
     return None
@@ -108,7 +114,7 @@ def parse_batch_affinities(path):
         value = next((float(mol.GetProp(k)) for k in
                       ("minimizedAffinity", "CNNaffinity", "affinity")
                       if mol.HasProp(k)), None)
-        if value is not None and (name not in scores or value < scores[name]):
+        if value is not None and math.isfinite(value) and (name not in scores or value < scores[name]):
             scores[name] = value
     return scores
 
@@ -134,9 +140,7 @@ def prepare_ligand_sdf(smiles, name, out_dir):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{name}.sdf"
-    writer = Chem.SDWriter(str(path))
-    writer.write(mol)
-    writer.close()
+    writer = Chem.SDWriter(str(path)); writer.write(mol); writer.close()
     return path
 
 
@@ -167,15 +171,25 @@ def write_batch_sdf(prepared, output_path):
                     continue
                 mol.SetProp("_Name", name)
                 mol.SetProp("RemediaLigandName", name)
-                writer.write(mol)
-                written += 1
-                break
+                writer.write(mol); written += 1; break
     finally:
         writer.close()
     if not written:
         output_path.unlink(missing_ok=True)
         raise ValueError("Batch SDF boş")
     return output_path
+
+
+def _prepared_receptor(receptor, out_dir):
+    path = Path(receptor)
+    if not path.exists():
+        return receptor
+    return prepare_receptor_pdbqt(path, Path(out_dir) / "receptor")
+
+
+def _proc_error(proc):
+    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return " | ".join(lines[-5:]) or f"GNINA exit={proc.returncode}"
 
 
 def dock_batch_with_gnina(receptor, prepared_ligands, center, size, mode=MODE_FAST,
@@ -185,11 +199,13 @@ def dock_batch_with_gnina(receptor, prepared_ligands, center, size, mode=MODE_FA
     names = list(prepared_ligands)
     if not names:
         return []
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        receptor = _prepared_receptor(receptor, out_dir)
+    except ReceptorPreparationError as exc:
+        return [DockResult(n, mode, None, 0, False, str(exc)) for n in names]
     batch_in = write_batch_sdf(prepared_ligands, out_dir / f"{mode}_input.sdf")
-    batch_out = out_dir / f"{mode}_docked.sdf"
-    batch_out.unlink(missing_ok=True)
+    batch_out = out_dir / f"{mode}_docked.sdf"; batch_out.unlink(missing_ok=True)
     cmd = build_gnina_command(gnina_path, receptor, batch_in, center, size, mode,
                               batch_out, seed, extra_args, profile)
     started = time.time()
@@ -198,21 +214,19 @@ def dock_batch_with_gnina(receptor, prepared_ligands, center, size, mode=MODE_FA
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         elapsed = time.time() - started
         return [DockResult(n, mode, None, elapsed, False, str(exc)) for n in names]
-    elapsed = time.time() - started
-    each = elapsed / len(names)
+    elapsed = time.time() - started; each = elapsed / len(names)
     if proc.returncode != 0:
         batch_out.unlink(missing_ok=True)
-        lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-        error = " | ".join(lines[-3:]) or f"GNINA exit={proc.returncode}"
+        error = _proc_error(proc)
         return [DockResult(n, mode, None, each, False, error) for n in names]
     if not batch_out.exists():
         return [DockResult(n, mode, None, each, False, "GNINA çıktı üretmedi") for n in names]
     try:
         scores = parse_batch_affinities(batch_out)
     except Exception as exc:
-        return [DockResult(n, mode, None, each, False, str(exc)) for n in names]
+        return [DockResult(n, mode, None, each, False, f"Skor ayrıştırma hatası: {exc}") for n in names]
     return [DockResult(n, mode, scores.get(n), each, n in scores,
-                       None if n in scores else "batch skorunda ligand yok",
+                       None if n in scores else "GNINA çıktısında ligand skoru yok",
                        str(batch_out)) for n in names]
 
 
@@ -220,12 +234,13 @@ def dock_with_gnina(receptor, ligand_file, center, size, mode=MODE_FAST,
                     ligand_name=None, gnina_path=DEFAULT_GNINA_PATH, out_dir=None,
                     seed=42, extra_args=None, timeout=None,
                     profile=PROFILE_BALANCED):
-    ligand_file = Path(ligand_file)
-    name = ligand_name or ligand_file.stem
-    out_dir = Path(out_dir or ligand_file.parent)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{name}_{mode}_docked.sdf"
-    out_path.unlink(missing_ok=True)
+    ligand_file = Path(ligand_file); name = ligand_name or ligand_file.stem
+    out_dir = Path(out_dir or ligand_file.parent); out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{name}_{mode}_docked.sdf"; out_path.unlink(missing_ok=True)
+    try:
+        receptor = _prepared_receptor(receptor, out_dir)
+    except ReceptorPreparationError as exc:
+        return DockResult(name, mode, None, 0, False, str(exc))
     cmd = build_gnina_command(gnina_path, receptor, ligand_file, center, size, mode,
                               out_path, seed, extra_args, profile)
     started = time.time()
@@ -236,12 +251,10 @@ def dock_with_gnina(receptor, ligand_file, center, size, mode=MODE_FAST,
     elapsed = time.time() - started
     if proc.returncode != 0:
         out_path.unlink(missing_ok=True)
-        lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return DockResult(name, mode, None, elapsed, False,
-                          " | ".join(lines[-3:]) or f"GNINA exit={proc.returncode}")
+        return DockResult(name, mode, None, elapsed, False, _proc_error(proc))
     affinity = parse_affinity(out_path, proc.stdout)
     return DockResult(name, mode, affinity, elapsed, affinity is not None,
-                      None if affinity is not None else "skor okunamadı", str(out_path))
+                      None if affinity is not None else "GNINA skoru okunamadı", str(out_path))
 
 
 def select_top_candidates(results, top_n=None, top_fraction=0.10):
@@ -263,12 +276,25 @@ def _ordered_results(molecules, prepared, failures, mode, batch_results):
 def _rows(results, mode):
     source = KAYNAK_FAST if mode == MODE_FAST else KAYNAK_ACCURATE
     return [{"ligand": r.ligand, "affinity_kcal_mol": r.affinity_kcal_mol,
-             "skor_kaynagi": source,
+             "skor_kaynagi": source if r.success else None,
+             "docking_success": r.success, "docking_error": r.error,
              "fast_affinity_kcal_mol": r.affinity_kcal_mol if mode == MODE_FAST else None,
              "accurate_affinity_kcal_mol": r.affinity_kcal_mol if mode == MODE_ACCURATE else None,
              "fast_seconds": round(r.elapsed_seconds, 3) if mode == MODE_FAST else None,
              "accurate_seconds": round(r.elapsed_seconds, 3) if mode == MODE_ACCURATE else None}
             for r in results]
+
+
+def _raise_if_no_scores(results, stage):
+    valid = [r for r in results if r.success and r.affinity_kcal_mol is not None]
+    if valid:
+        return
+    errors = []
+    for result in results:
+        if result.error and result.error not in errors:
+            errors.append(result.error)
+    detail = " | ".join(errors[:3]) or "GNINA geçerli skor üretmedi"
+    raise GninaScreeningError(f"{stage} docking başarısız: {detail}")
 
 
 def run_single_mode_screening(molecules, receptor, center, size, mode=MODE_FAST,
@@ -283,6 +309,7 @@ def run_single_mode_screening(molecules, receptor, center, size, mode=MODE_FAST,
                           gnina_path=gnina_path, out_dir=Path(out_dir) / mode,
                           seed=seed, extra_args=extra_args, timeout=timeout, profile=profile)
     results = _ordered_results(molecules, prepared, failures, mode, batch)
+    _raise_if_no_scores(results, mode.upper())
     return _rows(results, mode), {mode: results, "prepared": prepared, "gnina_processes": 1}
 
 
@@ -299,6 +326,7 @@ def run_two_stage_screening(molecules, receptor, center, size,
                                gnina_path=gnina_path, out_dir=out_dir / "fast", seed=seed,
                                extra_args=extra_args, timeout=timeout, profile=profile)
     fast = _ordered_results(molecules, prepared, failures, MODE_FAST, fast_batch)
+    _raise_if_no_scores(fast, "FAST")
     top = select_top_candidates(fast, top_n, top_fraction)
     selected = {r.ligand: prepared[r.ligand] for r in top if r.ligand in prepared}
     log_fn(f"[2/2] ACCURATE batch ({profile}): {len(selected)} ligand, tek GNINA süreci")
@@ -309,10 +337,12 @@ def run_two_stage_screening(molecules, receptor, center, size,
     rows = []
     for fr in fast:
         acc = acc_by_name.get(fr.ligand)
-        use_acc = acc is not None and acc.success
+        use_acc = acc is not None and acc.success and acc.affinity_kcal_mol is not None
         rows.append({"ligand": fr.ligand,
                      "affinity_kcal_mol": acc.affinity_kcal_mol if use_acc else fr.affinity_kcal_mol,
                      "skor_kaynagi": KAYNAK_ACCURATE if use_acc else KAYNAK_FAST,
+                     "docking_success": fr.success or use_acc,
+                     "docking_error": None if (fr.success or use_acc) else fr.error,
                      "fast_affinity_kcal_mol": fr.affinity_kcal_mol,
                      "accurate_affinity_kcal_mol": acc.affinity_kcal_mol if acc else None,
                      "fast_seconds": round(fr.elapsed_seconds, 3),
@@ -334,6 +364,8 @@ def benchmark_fast_vs_accurate(molecules, receptor, center, size,
                   timeout=timeout, profile=profile)
     fast = batch_dock_fn(mode=MODE_FAST, out_dir=Path(out_dir) / "fast", **common)
     accurate = batch_dock_fn(mode=MODE_ACCURATE, out_dir=Path(out_dir) / "accurate", **common)
+    _raise_if_no_scores(fast, "FAST benchmark")
+    _raise_if_no_scores(accurate, "ACCURATE benchmark")
     f, a = {r.ligand: r for r in fast}, {r.ligand: r for r in accurate}
     rows = []
     for name in prepared:
