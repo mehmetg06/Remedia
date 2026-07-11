@@ -16,6 +16,10 @@ data/pocket_info.txt
 # Bu sayede elle kopyala-yapıştır tamamen ortadan kalkar.
 results/
 
+# Yerel Remedia ortamı ve sonuçları
+.remedia-tools/
+local_workspace/
+
 # Snakemake çalışma meta verileri
 .snakemake/
 
