@@ -1,4 +1,4 @@
-"""Deploy a fixed-URL, token-protected Remedia JupyterLab on Modal.
+"""Deploy a fixed-URL Remedia JupyterLab on Modal with workspace authentication.
 
 Deploy:
     modal deploy modal/remedia_web_jupyter.py
@@ -16,7 +16,6 @@ APP_NAME = "remedia-web-jupyter"
 VOLUME_NAME = "remedia-data"
 VOLUME_PATH = Path("/workspace")
 REPO_PATH = VOLUME_PATH / "Remedia"
-SECRET_NAME = "remedia-jupyter-auth"
 
 PYTHON_PACKAGES = [
     "requests>=2.31.0",
@@ -66,7 +65,6 @@ image = (
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-auth = modal.Secret.from_name(SECRET_NAME)
 
 
 @app.function(
@@ -75,14 +73,13 @@ auth = modal.Secret.from_name(SECRET_NAME)
     cpu=4,
     memory=8192,
     volumes={str(VOLUME_PATH): volume},
-    secrets=[auth],
     timeout=4 * 60 * 60,
     max_containers=1,
     scaledown_window=120,
 )
-@modal.web_server(8888, startup_timeout=300)
+@modal.web_server(8888, startup_timeout=300, requires_proxy_auth=True)
 def jupyter():
-    """Start JupyterLab only while the fixed web URL is being used."""
+    """Start JupyterLab while the authenticated Modal URL is in use."""
     REPO_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not (REPO_PATH / "src").is_dir():
         shutil.copytree("/opt/remedia", REPO_PATH)
@@ -107,7 +104,6 @@ def jupyter():
     env["REMEDIA_HOME"] = str(REPO_PATH)
     env["REMEDIA_WORKSPACE"] = str(VOLUME_PATH)
 
-    token = env["JUPYTER_TOKEN"]
     command = [
         "jupyter", "lab",
         "--no-browser", "--allow-root", "--ip=0.0.0.0", "--port=8888",
@@ -115,6 +111,7 @@ def jupyter():
         "--ServerApp.allow_origin=*",
         "--ServerApp.allow_remote_access=True",
         "--ServerApp.default_url=/lab/tree/Remedia/notebooks/remedia_modal.ipynb",
-        f"--IdentityProvider.token={token}",
+        "--IdentityProvider.token=",
+        "--ServerApp.password=",
     ]
     subprocess.Popen(command, env=env)
