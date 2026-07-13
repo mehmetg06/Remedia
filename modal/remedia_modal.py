@@ -1,12 +1,13 @@
-"""Modal GPU/Jupyter launcher for Remedia.
+"""Modal GPU/Jupyter launcher and reusable notebook image for Remedia.
 
-Quick start:
+One-time image registration:
     python -m pip install modal
     python -m modal setup
-    modal run modal/remedia_modal.py --timeout-minutes 60
+    modal deploy modal/remedia_modal.py
 
-Choose another GPU:
-    REMEDIA_MODAL_GPU=L40S modal run modal/remedia_modal.py --timeout-minutes 60
+After deployment, select the ``remedia-modal / notebook_image`` image in a
+hosted Modal Notebook. No web endpoint or continuously running container is
+created by the deployment.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ APP_NAME = "remedia-modal"
 VOLUME_NAME = "remedia-data"
 VOLUME_PATH = Path("/workspace")
 REPO_PATH = VOLUME_PATH / "Remedia"
-NOTEBOOK_PATH = REPO_PATH / "notebooks" / "remedia_modal.ipynb"
+NOTEBOOK_PATH = REPO_PATH / "notebooks" / "remedia_modal_launcher.ipynb"
 MAX_SESSION_MINUTES = 240
 
 ALLOWED_GPUS = {
@@ -69,11 +70,21 @@ image = (
         "https://github.com/gnina/gnina/releases/download/v1.3/gnina "
         "--output /usr/local/bin/gnina",
         "chmod 0755 /usr/local/bin/gnina",
+        "mkdir -p /opt/remedia-nvidia-libs && "
+        "find /usr/local/lib/python3.11/site-packages/nvidia "
+        "-path '*/lib/*.so*' -type f "
+        "-exec ln -sf {} /opt/remedia-nvidia-libs/ \\;",
+        "test -e /opt/remedia-nvidia-libs/libcusparse.so.12",
+        "test -e /opt/remedia-nvidia-libs/libnvToolsExt.so.1",
+        "LD_LIBRARY_PATH=/opt/remedia-nvidia-libs /usr/local/bin/gnina --version",
     )
     .env(
         {
             "GNINA_PATH": "/usr/local/bin/gnina",
+            "LD_LIBRARY_PATH": "/opt/remedia-nvidia-libs",
+            "PATH": "/opt/remedia-fpocket/bin:/usr/local/bin:/usr/bin:/bin",
             "PYTHONUNBUFFERED": "1",
+            "REMEDIA_PREBUILT_IMAGE": "1",
         }
     )
     .add_local_dir(
@@ -124,16 +135,14 @@ def _sync_repo(refresh_code: bool) -> None:
     max_containers=1,
 )
 def run_jupyter(timeout_minutes: int = 60, refresh_code: bool = False) -> None:
-    """Start a token-protected JupyterLab session on a Modal GPU."""
+    """Start a temporary token-protected JupyterLab session on a Modal GPU."""
 
     timeout_minutes = max(15, min(int(timeout_minutes), MAX_SESSION_MINUTES))
     _sync_repo(refresh_code=refresh_code)
     volume.commit()
 
     env = os.environ.copy()
-    env["PATH"] = f"/opt/remedia-fpocket/bin:{env.get('PATH', '')}"
     env["PYTHONPATH"] = f"{REPO_PATH / 'src'}:{env.get('PYTHONPATH', '')}"
-    env["GNINA_PATH"] = "/usr/local/bin/gnina"
     env["REMEDIA_HOME"] = str(REPO_PATH)
     env["REMEDIA_WORKSPACE"] = str(VOLUME_PATH)
 
@@ -149,7 +158,7 @@ def run_jupyter(timeout_minutes: int = 60, refresh_code: bool = False) -> None:
         f"--ServerApp.root_dir={VOLUME_PATH}",
         "--ServerApp.allow_origin=*",
         "--ServerApp.allow_remote_access=True",
-        "--ServerApp.default_url=/lab/tree/Remedia/notebooks/remedia_modal.ipynb",
+        "--ServerApp.default_url=/lab/tree/Remedia/notebooks/remedia_modal_launcher.ipynb",
         f"--IdentityProvider.token={token}",
     ]
 
@@ -157,7 +166,7 @@ def run_jupyter(timeout_minutes: int = 60, refresh_code: bool = False) -> None:
         process = subprocess.Popen(command, env=env)
         direct_url = (
             f"{tunnel.url.rstrip('/')}"
-            "/lab/tree/Remedia/notebooks/remedia_modal.ipynb"
+            "/lab/tree/Remedia/notebooks/remedia_modal_launcher.ipynb"
             f"?token={quote(token)}"
         )
         print("=" * 72)
@@ -192,7 +201,7 @@ def run_jupyter(timeout_minutes: int = 60, refresh_code: bool = False) -> None:
     timeout=5 * 60,
 )
 def notebook_image() -> dict[str, str]:
-    """Registers the custom image for use in hosted Modal Notebooks."""
+    """Register the prebuilt image for hosted Modal Notebooks."""
 
     _sync_repo(refresh_code=False)
     volume.commit()
@@ -201,12 +210,13 @@ def notebook_image() -> dict[str, str]:
         "gpu": GPU,
         "notebook": str(NOTEBOOK_PATH),
         "volume": VOLUME_NAME,
+        "prebuilt": os.environ.get("REMEDIA_PREBUILT_IMAGE", "0"),
     }
 
 
 @app.local_entrypoint()
 def main(timeout_minutes: int = 60, refresh_code: bool = False) -> None:
-    """Launch Jupyter and keep the local command attached until it closes."""
+    """Launch temporary Jupyter and keep the local command attached."""
 
     run_jupyter.remote(
         timeout_minutes=timeout_minutes,
