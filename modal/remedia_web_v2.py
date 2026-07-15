@@ -142,7 +142,14 @@ class _ProgressStream(io.TextIOBase):
         elif "reinvent" in low or "sampling" in low or "prior" in low:
             _write_job(self.job_id, state="running", step=3, message="REINVENT4 hazırlanıyor ve molekül üretiyor")
         elif "gnina" in low or "docking" in low:
-            _write_job(self.job_id, state="running", step=4, message="GNINA docking yapıyor")
+            clean = text.strip()
+            message = clean[-220:] if clean else "GNINA docking yapıyor"
+            _write_job(
+                self.job_id,
+                state="running",
+                step=4,
+                message=message,
+            )
         elif "admet" in low or "sıral" in low or "zip" in low:
             _write_job(self.job_id, state="running", step=5, message="Sonuçlar hazırlanıyor")
         return len(text)
@@ -255,13 +262,16 @@ def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
         if result_dir is None:
             raise RuntimeError("İşlem tamamlandı ancak sonuç klasörü bulunamadı.")
 
-        zip_path = shutil.make_archive(str(result_dir), "zip", root_dir=result_dir)
+        zip_path = Path(
+            shutil.make_archive(str(result_dir), "zip", root_dir=result_dir)
+        )
+
         _write_job(
             job_id,
             state="done",
             step=5,
             message="Tamamlandı",
-            result_zip=str(Path(zip_path).relative_to(VOLUME_PATH)),
+            result_zip=str(zip_path.resolve()),
         )
     except Exception as exc:
         technical = stream.buffer[-8000:] + "\n" + traceback.format_exc()
@@ -367,7 +377,10 @@ def web():
         rel = data.get("result_zip")
         if data.get("state") != "done" or not rel:
             raise HTTPException(409, "Sonuç henüz hazır değil.")
-        file_path = VOLUME_PATH / rel
+        file_path = Path(rel)
+        if not file_path.is_absolute():
+            file_path = VOLUME_PATH / file_path
+
         if not file_path.exists():
             raise HTTPException(404, "Sonuç dosyası bulunamadı.")
         return FileResponse(file_path, filename=file_path.name, media_type="application/zip")
