@@ -208,13 +208,58 @@ def dock_batch_with_gnina(receptor, prepared_ligands, center, size, mode=MODE_FA
     batch_out = out_dir / f"{mode}_docked.sdf"; batch_out.unlink(missing_ok=True)
     cmd = build_gnina_command(gnina_path, receptor, batch_in, center, size, mode,
                               batch_out, seed, extra_args, profile)
+    flags = _flags(mode, profile)
+    print(
+        f"[GNINA] {mode}: {len(names)} ligand, "
+        f"exhaustiveness={flags['exhaustiveness']}, "
+        f"num_modes={flags['num_modes']}",
+        flush=True,
+    )
+    print("[GNINA] Komut başlatıldı", flush=True)
+
     started = time.time()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        output_lines = []
+        assert proc.stdout is not None
+
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            output_lines.append(line)
+            print("[GNINA] " + line, flush=True)
+
+        return_code = proc.wait(timeout=timeout)
+        combined_output = "\n".join(output_lines)
+
+        class ProcResult:
+            pass
+
+        result = ProcResult()
+        result.returncode = return_code
+        result.stdout = combined_output
+        result.stderr = combined_output
+        proc = result
+
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         elapsed = time.time() - started
         return [DockResult(n, mode, None, elapsed, False, str(exc)) for n in names]
-    elapsed = time.time() - started; each = elapsed / len(names)
+
+    elapsed = time.time() - started
+    print(
+        f"[GNINA] {mode} tamamlandı: {elapsed:.1f} saniye "
+        f"({elapsed / len(names):.1f} sn/ligand)",
+        flush=True,
+    )
+    each = elapsed / len(names)
     if proc.returncode != 0:
         batch_out.unlink(missing_ok=True)
         error = _proc_error(proc)
