@@ -206,6 +206,7 @@ def _prepare_reinvent_location() -> None:
 @app.function(
     image=image,
     gpu="L4",
+    cpu=8.0,
     volumes={str(VOLUME_PATH): volume},
     timeout=4 * 60 * 60,
     max_containers=1,
