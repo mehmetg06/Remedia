@@ -144,8 +144,18 @@ def _artifact_path(value: str | None) -> Path | None:
     return path
 
 
+#: Prefix marking a machine-readable structured progress line (see src/progress.py).
+PROGRESS_SENTINEL = "[[REMEDIA_PROGRESS]]"
+
+
 class _ProgressStream(io.TextIOBase):
-    """Capture pipeline logs without stalling GNINA on frequent Volume commits."""
+    """Capture pipeline logs without stalling GNINA on frequent Volume commits.
+
+    Phase 2: when the pipeline emits structured progress events (lines prefixed
+    with :data:`PROGRESS_SENTINEL`), those precise stage/task/item counts drive
+    the UI.  For any line without a sentinel the legacy heuristic scraping below
+    remains as a fallback, so older pipeline code keeps reporting progress.
+    """
 
     COMMIT_INTERVAL_SECONDS = 3.0
 
@@ -198,10 +208,62 @@ class _ProgressStream(io.TextIOBase):
             return min(90, 78 + int(elapsed / 10.0))
         return max(self.percent, 54)
 
+    def _structured(self, event: dict) -> None:
+        """Commit a structured progress event straight to the job file."""
+        percent = event.get("percent")
+        try:
+            percent = int(round(float(percent)))
+        except (TypeError, ValueError):
+            percent = self.percent
+        # Structured events carry the authoritative percent; still never regress.
+        self.percent = max(self.percent, min(percent, 99))
+        step = int(event.get("step", self.last_committed_step) or 1)
+        label = event.get("stage_label") or event.get("task") or ""
+        done, total = event.get("items_done"), event.get("items_total")
+        if total:
+            message = f"{label} ({done or 0}/{total})"
+        else:
+            message = event.get("message") or label
+        _write_job(
+            self.job_id,
+            state="running",
+            step=step,
+            progress_percent=self.percent,
+            message=message,
+            stage=event.get("stage"),
+            stage_label=label,
+            task=event.get("task"),
+            items_done=done,
+            items_total=total,
+            eta_seconds=event.get("eta_seconds"),
+        )
+        self.last_commit_at = time.monotonic()
+        self.last_committed_percent = self.percent
+        self.last_committed_step = step
+
     def write(self, text: str) -> int:
         self.buffer += text
         if len(self.buffer) > 50000:
             self.buffer = self.buffer[-50000:]
+
+        # Structured events (Phase 2) take priority over heuristic scraping.
+        if PROGRESS_SENTINEL in text:
+            handled = False
+            for line in text.splitlines():
+                idx = line.find(PROGRESS_SENTINEL)
+                if idx < 0:
+                    continue
+                payload = line[idx + len(PROGRESS_SENTINEL):].strip()
+                try:
+                    event = json.loads(payload)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(event, dict) and event.get("schema") == "remedia.progress/1":
+                    self._structured(event)
+                    handled = True
+            if handled:
+                return len(text)
+
         low = text.lower()
         clean = text.strip()
 
@@ -398,7 +460,8 @@ button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:1
 const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done'),pct=document.querySelector('#percent'),stages=[...document.querySelectorAll('.stage')];
 form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value)})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
 function paint(x){const p=Math.max(0,Math.min(100,Number(x.progress_percent??((x.step||1)/5*100))));fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';stages.forEach((el,i)=>el.classList.toggle('active',i<(x.step||1)));}
-async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=x.message||'';if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;document.querySelector('#report').href='/report/'+id;document.querySelector('#doneNote').textContent=`${x.candidate_count??0} aday bulundu; ${x.scored_candidate_count??0} aday için docking skoru okundu.`;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}step.innerHTML='<span class="spinner"></span> '+(x.step||1)+'/5';setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
+function detail(x){let m=x.message||'';if(x.items_total){m=(x.stage_label||x.task||m)+' ('+(x.items_done||0)+'/'+x.items_total+')';}if(x.eta_seconds){m+=' · ~'+Math.round(x.eta_seconds)+'s kaldı';}return m;}
+async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=detail(x);if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;document.querySelector('#report').href='/report/'+id;document.querySelector('#doneNote').textContent=`${x.candidate_count??0} aday bulundu; ${x.scored_candidate_count??0} aday için docking skoru okundu.`;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}const title=x.stage_label||((x.step||1)+'/5');step.innerHTML='<span class="spinner"></span> '+title;setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
 function showError(t){step.textContent='İşlem durdu';err.className='error';err.textContent=t;const b=document.createElement('button');b.className='retry';b.textContent='Tekrar dene';b.onclick=()=>location.reload();err.appendChild(b);}
 </script></main></body></html>'''
 
