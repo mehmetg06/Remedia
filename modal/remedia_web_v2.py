@@ -335,6 +335,7 @@ def _prepare_reinvent_location() -> None:
     gpu="L4",
     cpu=8.0,
     volumes={str(VOLUME_PATH): volume},
+    secrets=[modal.Secret.from_name("molmim")],
     timeout=4 * 60 * 60,
     max_containers=1,
 )
