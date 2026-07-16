@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import import Path
+from pathlib import Path
 from statistics import mean, median
 
 from receptor_prep import ReceptorPreparationError, prepare_receptor_pdbqt
