@@ -56,6 +56,11 @@ class WebWorkerAssetsTest(unittest.TestCase):
         self.assertIn('"gnina", "diffdock", "hybrid"', self.source)
         self.assertIn('"pose_engine": pose_engine', self.source)
 
+    def test_scientific_report_wired(self):
+        # Phase 7/7.5: rich report layered additively, image src rewritten.
+        self.assertIn("build_scientific_report", self.source)
+        self.assertIn("report-asset", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

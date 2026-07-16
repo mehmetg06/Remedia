@@ -417,6 +417,45 @@ def run_job(
             job_id=job_id,
         )
 
+        # Phase 7/7.5: richer scientist report layered additively on top of the
+        # base package. Failures here must not fail the run — fall back to the
+        # base report.html.
+        report_file = str(Path(report_info["report_path"]).resolve())
+        try:
+            known_ligands = None
+            pocket_center = None
+            try:
+                from known_ligands import fetch_known_ligands
+
+                known_ligands, _ = fetch_known_ligands(uniprot_id, max_results=8)
+            except Exception:
+                known_ligands = None
+            try:
+                cache = json.loads(
+                    (VOLUME_PATH / "remedia_cache" / "pocket_cache.json").read_text()
+                )
+                entry = cache.get(uniprot_id.upper())
+                pocket_center = entry.get("center") if isinstance(entry, dict) else None
+            except Exception:
+                pocket_center = None
+
+            from scientific_report import build_scientific_report
+
+            sci = build_scientific_report(
+                result_dir,
+                target_uniprot=uniprot_id,
+                requested_molecules=molecule_count,
+                settings=settings,
+                pipeline_log=stream.buffer,
+                job_id=job_id,
+                known_ligands=known_ligands,
+                pocket_center=pocket_center,
+            )
+            if sci.get("report_path"):
+                report_file = str(Path(sci["report_path"]).resolve())
+        except Exception as exc:  # keep base report if the rich one fails
+            stream.write(f"Bilimsel rapor üretilemedi (temel rapor kullanılacak): {exc}\n")
+
         zip_path = Path(shutil.make_archive(str(result_dir), "zip", root_dir=result_dir))
         candidate_count = int(report_info.get("candidate_count", 0))
         scored_count = int(report_info.get("scored_candidate_count", 0))
@@ -427,7 +466,7 @@ def run_job(
             progress_percent=100,
             message=f"Tamamlandı · {candidate_count} aday, {scored_count} docking skoru",
             result_zip=str(zip_path.resolve()),
-            report_file=str(Path(report_info["report_path"]).resolve()),
+            report_file=report_file,
             report_available=True,
             candidate_count=candidate_count,
             scored_candidate_count=scored_count,
@@ -573,9 +612,12 @@ def web():
         if not report_path.is_file():
             raise HTTPException(404, "Rapor dosyası bulunamadı.")
         report_html = report_path.read_text(encoding="utf-8")
-        report_html = report_html.replace(
-            "src='top_molecules.png'",
-            f"src='/report-asset/{job_id}/top_molecules.png'",
+        # Rewrite any local image reference (top_molecules.png, fig_*.png, …) to
+        # the asset endpoint so both the base and scientist reports render images.
+        report_html = re.sub(
+            r"src=(['\"])([^/'\"]+\.png)\1",
+            lambda m: f"src={m.group(1)}/report-asset/{job_id}/{m.group(2)}{m.group(1)}",
+            report_html,
         )
         return HTMLResponse(report_html)
 
