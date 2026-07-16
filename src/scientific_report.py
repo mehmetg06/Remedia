@@ -658,6 +658,17 @@ def build_scientific_report(
         "figures": figures,
         "pdf": bool(pdf_path),
     }
+    # Phase 9: full reproducibility record (git SHA, seeds, versions, params).
+    try:
+        import reproducibility
+
+        manifest["reproducibility"] = reproducibility.capture_run_metadata(
+            settings=settings or {},
+            seeds=seeds or [],
+            gnina_path=(settings or {}).get("gnina_path"),
+        )
+    except Exception:
+        pass
     (report_dir / "run_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
