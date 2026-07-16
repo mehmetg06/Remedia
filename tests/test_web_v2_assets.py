@@ -50,6 +50,12 @@ class WebWorkerAssetsTest(unittest.TestCase):
         self.assertIn("generator: str", self.source)
         self.assertIn('"generator": generator', self.source)
 
+    def test_start_validates_pose_engine(self):
+        # Phase 5: pose engine is validated and passed through to run_job.
+        self.assertIn('payload.get("pose_engine"', self.source)
+        self.assertIn('"gnina", "diffdock", "hybrid"', self.source)
+        self.assertIn('"pose_engine": pose_engine', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
