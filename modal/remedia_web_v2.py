@@ -338,7 +338,13 @@ def _prepare_reinvent_location() -> None:
     timeout=4 * 60 * 60,
     max_containers=1,
 )
-def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
+def run_job(
+    job_id: str,
+    uniprot_id: str,
+    molecule_count: int,
+    generator: str = "reinvent4",
+    pose_engine: str = "gnina",
+) -> None:
     _sync_repo()
     _prepare_reinvent_location()
     volume.commit()
@@ -366,6 +372,8 @@ def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
         settings = {
             "uniprot_id": uniprot_id,
             "method": "pretrained",
+            "generator": generator,
+            "pose_engine": pose_engine,
             "generate_n": molecule_count,
             "profile": "balanced",
             "docking_mode": "iki_asamali",
@@ -448,17 +456,28 @@ HTML = r'''<!doctype html>
 <title>Remedia</title><style>
 :root{font-family:Inter,system-ui,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(590px,100%);background:#fff;border:1px solid #deded8;border-radius:24px;padding:28px;box-shadow:0 18px 55px #00000012}
-h1{margin:0 0 6px;font-size:34px}.sub{margin:0 0 26px;color:#666}.field{margin:18px 0}label{display:block;font-weight:700;margin-bottom:8px}input{width:100%;padding:15px;border:1px solid #c9c9c3;border-radius:13px;font-size:18px}
+h1{margin:0 0 6px;font-size:34px}.sub{margin:0 0 26px;color:#666}.field{margin:18px 0}label{display:block;font-weight:700;margin-bottom:8px}input{width:100%;padding:15px;border:1px solid #c9c9c3;border-radius:13px;font-size:18px}input[type=radio]{width:auto;padding:0}
+.choices{display:flex;gap:8px;flex-wrap:wrap}.choice{flex:1;min-width:120px;display:flex;align-items:center;gap:8px;padding:12px 14px;border:1px solid #c9c9c3;border-radius:13px;font-weight:600;cursor:pointer}.choice:has(input:checked){border-color:#171717;background:#f0f0ec}
 button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.btn.secondary{background:#ecece8;color:#171717;margin-bottom:10px}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.progress-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:10px}.progress-title{font-weight:800}.percent{font-variant-numeric:tabular-nums;font-weight:800;color:#555}.bar{height:14px;background:#e9e9e4;border-radius:99px;overflow:hidden;position:relative}.fill{height:100%;width:0;background:linear-gradient(90deg,#111,#4d4d4d);transition:width .65s cubic-bezier(.2,.8,.2,1);position:relative}.fill:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 25%,#ffffff55 45%,transparent 65%);animation:shine 1.6s linear infinite}@keyframes shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}.stages{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:9px}.stage{height:4px;border-radius:99px;background:#e9e9e4}.stage.active{background:#555}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.done{display:none;margin-top:18px}.done-note{padding:13px;background:#f6f6f3;border-radius:12px;margin-bottom:12px;color:#555}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
 </style></head><body><main class="card"><h1>Remedia</h1><p class="sub">REINVENT4 → GNINA → ADMET</p>
 <form id="form"><div class="field"><label for="u">UniProt ID</label><input id="u" value="P00918" autocomplete="off" required pattern="[A-Za-z0-9-]{4,16}"></div>
 <div class="field"><label for="n">Molekül sayısı</label><input id="n" type="number" value="20" min="5" max="100" step="5" required></div>
+<div class="field"><label>Üretici (Generator)</label><div class="choices">
+<label class="choice"><input type="radio" name="gen" value="reinvent4" checked> REINVENT4</label>
+<label class="choice"><input type="radio" name="gen" value="molmim"> MolMIM</label>
+<label class="choice"><input type="radio" name="gen" value="hybrid"> Hybrid</label>
+</div></div>
+<div class="field"><label>Poz motoru (Pose Engine)</label><div class="choices">
+<label class="choice"><input type="radio" name="pose" value="gnina" checked> GNINA</label>
+<label class="choice"><input type="radio" name="pose" value="diffdock"> DiffDock</label>
+<label class="choice"><input type="radio" name="pose" value="hybrid"> Hybrid Validation</label>
+</div></div>
 <button id="start" type="submit">Remedia’yı Başlat</button><p class="muted">Sonuç paketi açıklamalı HTML raporu, tekleştirilmiş aday tablosu, veri sözlüğü, çalışma ayarları ve teknik log içerecektir.</p></form>
 <section id="progress" class="progress"><div class="progress-head"><div class="progress-title">İşlem ilerliyor</div><div id="percent" class="percent">0%</div></div><div class="bar"><div id="fill" class="fill"></div></div><div class="stages"><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div></div><div id="step" class="step"><span class="spinner"></span> Hazırlanıyor</div><div id="message" class="muted"></div><div id="error"></div></section>
 <section id="done" class="done"><div id="doneNote" class="done-note">Açıklamalı rapor ve ham veriler hazır.</div><a id="report" class="btn secondary" target="_blank">Raporu tarayıcıda aç</a><a id="download" class="btn">Tam sonuç paketini indir</a><button class="retry" onclick="location.reload()">Yeni işlem</button></section>
 <script>
 const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done'),pct=document.querySelector('#percent'),stages=[...document.querySelectorAll('.stage')];
-form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value)})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
+form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value),generator:document.querySelector('input[name=gen]:checked').value,pose_engine:document.querySelector('input[name=pose]:checked').value})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
 function paint(x){const p=Math.max(0,Math.min(100,Number(x.progress_percent??((x.step||1)/5*100))));fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';stages.forEach((el,i)=>el.classList.toggle('active',i<(x.step||1)));}
 function detail(x){let m=x.message||'';if(x.items_total){m=(x.stage_label||x.task||m)+' ('+(x.items_done||0)+'/'+x.items_total+')';}if(x.eta_seconds){m+=' · ~'+Math.round(x.eta_seconds)+'s kaldı';}return m;}
 async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=detail(x);if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;document.querySelector('#report').href='/report/'+id;document.querySelector('#doneNote').textContent=`${x.candidate_count??0} aday bulundu; ${x.scored_candidate_count??0} aday için docking skoru okundu.`;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}const title=x.stage_label||((x.step||1)+'/5');step.innerHTML='<span class="spinner"></span> '+title;setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
@@ -500,6 +519,13 @@ def web():
         if not 5 <= molecule_count <= 100:
             raise HTTPException(400, "Molekül sayısı 5 ile 100 arasında olmalı.")
 
+        generator = str(payload.get("generator", "reinvent4")).strip().lower()
+        if generator not in {"reinvent4", "molmim", "hybrid"}:
+            generator = "reinvent4"
+        pose_engine = str(payload.get("pose_engine", "gnina")).strip().lower()
+        if pose_engine not in {"gnina", "diffdock", "hybrid"}:
+            pose_engine = "gnina"
+
         job_id = uuid.uuid4().hex
         JOBS_PATH.mkdir(parents=True, exist_ok=True)
         _write_job_local(
@@ -510,9 +536,11 @@ def web():
             message="GPU sırası bekleniyor",
             uniprot_id=uniprot,
             molecule_count=molecule_count,
+            generator=generator,
+            pose_engine=pose_engine,
         )
         await volume.commit.aio()
-        await run_job.spawn.aio(job_id, uniprot, molecule_count)
+        await run_job.spawn.aio(job_id, uniprot, molecule_count, generator, pose_engine)
         return {"job_id": job_id}
 
     async def _read_job(job_id: str) -> dict:
