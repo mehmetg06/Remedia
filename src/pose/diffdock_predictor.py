@@ -2,22 +2,10 @@
 # Licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).
 # See the LICENSE file in the project root for full terms.
 
-"""DiffDock pose predictor behind the :class:`BasePosePredictor` interface (Phase 5).
+"""DiffDock pose predictor behind the :class:`BasePosePredictor` interface.
 
-This **reuses the DiffDock groundwork already in the repository** rather than
-rebuilding it: ``merge_diffdock_results.load_diffdock`` parses a
-``diffdock_results.csv`` (``ligand, diffdock_confidence, ...``) that DiffDock
-produces (e.g. the existing Colab flow) and this predictor turns those
-confidences into engine-agnostic :class:`PoseScore` records.
-
-Three ways to obtain confidences, in priority order:
-
-1. an injected ``runner`` callable (used in tests / for a live DiffDock backend),
-2. an existing ``diffdock_results.csv`` (the repo's established workflow),
-3. the NVIDIA DiffDock NIM endpoint (credential-gated; documented, non-blocking).
-
-If none is available it raises :class:`DiffDockUnavailable`, which Hybrid
-Validation and the factory handle gracefully so a run is never blocked.
+Confidence scores are obtained, in order, from an injected runner, an existing
+``diffdock_results.csv``, or NVIDIA's hosted/self-hosted DiffDock NIM.
 """
 from __future__ import annotations
 
@@ -27,13 +15,19 @@ from typing import Any, Callable
 
 from .base import BasePosePredictor, PoseResult, PoseScore
 
-# NVIDIA DiffDock NIM (hosted). Override with DIFFDOCK_BASE_URL for self-hosted.
+# Hosted NVIDIA API. Self-hosted users can set DIFFDOCK_BASE_URL to the full
+# /molecular-docking/diffdock/generate endpoint.
 DEFAULT_DIFFDOCK_URL = "https://health.api.nvidia.com/v1/biology/mit/diffdock"
-API_KEY_ENV_VARS = ("DIFFDOCK_API_KEY", "NVIDIA_API_KEY", "NGC_API_KEY", "NVCF_RUN_KEY")
+API_KEY_ENV_VARS = (
+    "DIFFDOCK_API_KEY",
+    "NVIDIA_API_KEY",
+    "NGC_API_KEY",
+    "NVCF_RUN_KEY",
+)
 
 
 class DiffDockUnavailable(RuntimeError):
-    """Raised when no DiffDock source (runner / CSV / credentials) is available."""
+    """Raised when DiffDock cannot provide scores."""
 
 
 def diffdock_api_key() -> str | None:
@@ -42,6 +36,42 @@ def diffdock_api_key() -> str | None:
         if value and value.strip():
             return value.strip()
     return None
+
+
+def _smiles_to_sdf(smiles: str, name: str) -> str:
+    """Create one 3D SDF record accepted by DiffDock NIM."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise DiffDockUnavailable(f"RDKit yüklenemedi: {exc}") from exc
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise DiffDockUnavailable(f"Geçersiz SMILES: {name}")
+    mol = Chem.AddHs(mol)
+    status = AllChem.EmbedMolecule(mol, randomSeed=42)
+    if status != 0:
+        status = AllChem.EmbedMolecule(mol, useRandomCoords=True, randomSeed=42)
+    if status != 0:
+        raise DiffDockUnavailable(f"DiffDock için 3B ligand hazırlanamadı: {name}")
+    try:
+        AllChem.UFFOptimizeMolecule(mol, maxIters=200)
+    except Exception:
+        pass
+    mol.SetProp("_Name", name)
+    return Chem.MolToMolBlock(mol) + "\n$$$$\n"
+
+
+def _endpoint(url: str) -> str:
+    url = url.rstrip("/")
+    if url.endswith("/molecular-docking/diffdock/generate"):
+        return url
+    # Hosted build.nvidia.com endpoint uses the legacy full route above; a
+    # self-hosted base URL is normally host:port and needs the documented path.
+    if url.endswith("/diffdock") or "/v1/biology/" in url:
+        return url
+    return url + "/molecular-docking/diffdock/generate"
 
 
 class DiffDockPredictor(BasePosePredictor):
@@ -63,6 +93,76 @@ class DiffDockPredictor(BasePosePredictor):
         self._loader = loader
         self.base_url = base_url or os.environ.get("DIFFDOCK_BASE_URL", DEFAULT_DIFFDOCK_URL)
         self._log = log_fn
+        self.last_source = "unavailable"
+
+    def _nim_confidences(
+        self,
+        molecules: list[tuple[str, str]],
+        receptor: str | None,
+        out_dir: Any,
+        reporter: Any,
+    ) -> dict[str, float | None]:
+        import requests
+
+        key = diffdock_api_key()
+        if not key:
+            raise DiffDockUnavailable("DIFFDOCK_API_KEY bulunamadı")
+        if not receptor or not Path(receptor).is_file():
+            raise DiffDockUnavailable(f"DiffDock reseptör PDB dosyasını bulamadı: {receptor}")
+
+        protein = Path(receptor).read_text(encoding="utf-8", errors="ignore")
+        endpoint = _endpoint(self.base_url)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        }
+        output_dir = Path(out_dir or ".") / "diffdock_poses"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        confidences: dict[str, float | None] = {}
+
+        for index, (name, smiles) in enumerate(molecules, 1):
+            if reporter is not None:
+                reporter.log(f"DiffDock NIM: {name} ({index}/{len(molecules)})")
+            payload = {
+                "ligand": _smiles_to_sdf(smiles, name),
+                "ligand_file_type": "sdf",
+                "protein": protein,
+                "num_poses": 1,
+                "time_divisions": 20,
+                "steps": 18,
+                "save_trajectory": False,
+                "is_staged": False,
+            }
+            try:
+                response = requests.post(endpoint, headers=headers, json=payload, timeout=300)
+            except requests.RequestException as exc:
+                raise DiffDockUnavailable(f"DiffDock NIM bağlantı hatası: {exc}") from exc
+            if not response.ok:
+                detail = response.text.replace("\n", " ")[:600]
+                raise DiffDockUnavailable(
+                    f"DiffDock NIM HTTP {response.status_code}: {detail}"
+                )
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise DiffDockUnavailable("DiffDock NIM geçersiz JSON döndürdü") from exc
+            if str(data.get("status", "success")).lower() not in {"success", "ok"}:
+                raise DiffDockUnavailable(
+                    f"DiffDock NIM başarısız: {data.get('details') or data}"
+                )
+            scores = data.get("position_confidence") or data.get("pose_confidence") or []
+            confidence = float(scores[0]) if scores else None
+            confidences[name] = confidence
+            poses = data.get("ligand_positions") or data.get("docked_ligand") or []
+            if isinstance(poses, str):
+                poses = [poses]
+            if poses:
+                (output_dir / f"{name}_rank01.sdf").write_text(
+                    str(poses[0]), encoding="utf-8"
+                )
+
+        self.last_source = "nvidia_nim"
+        return confidences
 
     def _confidences(
         self,
@@ -74,29 +174,31 @@ class DiffDockPredictor(BasePosePredictor):
         reporter: Any,
         **kwargs: Any,
     ) -> dict[str, float | None]:
-        # 1) injected runner (tests / live backend)
         if self._runner is not None:
-            result = self._runner(molecules=molecules, receptor=receptor, center=center,
-                                  size=size, out_dir=out_dir, **kwargs)
+            result = self._runner(
+                molecules=molecules,
+                receptor=receptor,
+                center=center,
+                size=size,
+                out_dir=out_dir,
+                **kwargs,
+            )
+            self.last_source = "runner"
             if isinstance(result, (str, Path)):
                 return self._load_csv(Path(result))
             return dict(result or {})
-        # 2) existing diffdock_results.csv (repo groundwork)
+
         csv_path = self._find_results_csv(out_dir)
         if csv_path is not None:
             if reporter is not None:
                 reporter.log(f"DiffDock sonuçları okunuyor: {csv_path}")
+            self.last_source = "csv"
             return self._load_csv(csv_path)
-        # 3) hosted NIM (needs credentials) — documented, not run by default
+
         if diffdock_api_key():
-            raise DiffDockUnavailable(
-                "DiffDock NIM istemcisi bu ortamda etkin değil. "
-                "diffdock_results.csv sağla ya da bir runner enjekte et "
-                "(bkz. docs/diffdock_setup.md)."
-            )
+            return self._nim_confidences(molecules, receptor, out_dir, reporter)
         raise DiffDockUnavailable(
-            "DiffDock için kaynak bulunamadı: runner, diffdock_results.csv veya "
-            "DIFFDOCK_API_KEY gerekli. Kurulum: docs/diffdock_setup.md"
+            "DiffDock için runner, diffdock_results.csv veya DIFFDOCK_API_KEY bulunamadı"
         )
 
     def _find_results_csv(self, out_dir: Any) -> Path | None:
@@ -130,28 +232,44 @@ class DiffDockPredictor(BasePosePredictor):
         **kwargs: Any,
     ) -> PoseResult:
         if reporter is not None:
-            reporter.log("DiffDock poz tahmini")
-        confidences = self._confidences(molecules, receptor, center, size, out_dir, reporter, **kwargs)
+            reporter.log("DiffDock poz tahmini başlatılıyor")
+        try:
+            confidences = self._confidences(
+                molecules, receptor, center, size, out_dir, reporter, **kwargs
+            )
+        except DiffDockUnavailable as exc:
+            message = f"DiffDock kullanılamadı; GNINA fallback uygulanacak. Neden: {exc}"
+            self._log(message)
+            if reporter is not None:
+                reporter.log(message)
+            raise
 
         scores: list[PoseScore] = []
         for name, _smiles in molecules:
             conf = confidences.get(name)
-            scores.append(PoseScore(
-                ligand=name,
-                affinity_kcal_mol=None,
-                confidence=conf,
-                success=conf is not None,
-                source="diffdock",
-                error=None if conf is not None else "DiffDock skoru yok",
-            ))
+            scores.append(
+                PoseScore(
+                    ligand=name,
+                    affinity_kcal_mol=None,
+                    confidence=conf,
+                    success=conf is not None,
+                    source="diffdock",
+                    error=None if conf is not None else "DiffDock skoru yok",
+                )
+            )
         rows = [s.to_row() for s in scores]
+        ok = sum(1 for s in scores if s.success)
         if reporter is not None:
-            ok = sum(1 for s in scores if s.success)
             reporter.update(ok, total=len(scores), message=f"DiffDock: {ok}/{len(scores)} poz")
         return PoseResult(
             engine=self.name,
             scores=scores,
             rows=rows,
-            stage_info={"diffdock_scored": sum(1 for s in scores if s.success)},
-            metadata={"endpoint": self.base_url, "source_csv": str(self._find_results_csv(out_dir) or "")},
+            stage_info={"diffdock_scored": ok, "actual_pose_engine": "diffdock"},
+            metadata={
+                "endpoint": _endpoint(self.base_url),
+                "source": self.last_source,
+                "source_csv": str(self._find_results_csv(out_dir) or ""),
+                "actual_pose_engine": "diffdock",
+            },
         )
