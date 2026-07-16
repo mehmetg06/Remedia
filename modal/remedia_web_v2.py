@@ -73,6 +73,7 @@ image = (
     .env(
         {
             "GNINA_PATH": "/usr/local/bin/gnina",
+            "GNINA_CPU": "8",
             "LD_LIBRARY_PATH": "/opt/remedia-nvidia-libs",
             "PATH": "/opt/remedia-fpocket/bin:/usr/local/bin:/usr/bin:/bin",
             "PYTHONUNBUFFERED": "1",
@@ -140,27 +141,37 @@ class _ProgressStream(io.TextIOBase):
     def __init__(self, job_id: str):
         self.job_id = job_id
         self.buffer = ""
+        self.percent = 8
+
+    def _advance(self, percent: int, message: str, step: int) -> None:
+        self.percent = max(self.percent, min(percent, 96))
+        _write_job(
+            self.job_id,
+            state="running",
+            step=step,
+            progress_percent=self.percent,
+            message=message,
+        )
 
     def write(self, text: str) -> int:
         self.buffer += text
         if len(self.buffer) > 14000:
             self.buffer = self.buffer[-14000:]
         low = text.lower()
+        clean = text.strip()
+
         if "pocket" in low or "fpocket" in low:
-            _write_job(self.job_id, state="running", step=2, message="Pocket bulunuyor")
+            self._advance(18, "Bağlanma cebi belirleniyor", 2)
         elif "reinvent" in low or "sampling" in low or "prior" in low:
-            _write_job(self.job_id, state="running", step=3, message="REINVENT4 hazırlanıyor ve molekül üretiyor")
+            self._advance(36, clean[-180:] if clean else "REINVENT4 molekül üretiyor", 3)
+        elif "[1/2]" in low or "gnina] fast" in low or "fast batch" in low:
+            self._advance(58, "GNINA hızlı tarama yapıyor", 4)
+        elif "[2/2]" in low or "gnina] accurate" in low or "accurate batch" in low:
+            self._advance(78, "GNINA ayrıntılı doğrulama yapıyor", 4)
         elif "gnina" in low or "docking" in low:
-            clean = text.strip()
-            message = clean[-220:] if clean else "GNINA docking yapıyor"
-            _write_job(
-                self.job_id,
-                state="running",
-                step=4,
-                message=message,
-            )
+            self._advance(min(self.percent + 1, 88), clean[-180:] if clean else "GNINA docking yapıyor", 4)
         elif "admet" in low or "sıral" in low or "zip" in low:
-            _write_job(self.job_id, state="running", step=5, message="Sonuçlar hazırlanıyor")
+            self._advance(92, "ADMET ve sonuç dosyaları hazırlanıyor", 5)
         return len(text)
 
     def flush(self) -> None:
@@ -224,7 +235,13 @@ def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
     _sync_repo()
     _prepare_reinvent_location()
     volume.commit()
-    _write_job(job_id, state="running", step=1, message="Reseptör hazırlanıyor")
+    _write_job(
+        job_id,
+        state="running",
+        step=1,
+        progress_percent=8,
+        message="Reseptör hazırlanıyor",
+    )
 
     stream = _ProgressStream(job_id)
     original_cwd = Path.cwd()
@@ -233,6 +250,7 @@ def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
         os.environ["REMEDIA_HOME"] = str(REPO_PATH)
         os.environ["REMEDIA_WORKSPACE"] = str(VOLUME_PATH)
         os.environ["GNINA_PATH"] = "/usr/local/bin/gnina"
+        os.environ["GNINA_CPU"] = "8"
         src = str(REPO_PATH / "src")
         if src not in sys.path:
             sys.path.insert(0, src)
@@ -280,6 +298,7 @@ def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
             job_id,
             state="done",
             step=5,
+            progress_percent=100,
             message="Tamamlandı",
             result_zip=str(zip_path.resolve()),
         )
@@ -307,17 +326,18 @@ HTML = r'''<!doctype html>
 :root{font-family:Inter,system-ui,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(560px,100%);background:#fff;border:1px solid #deded8;border-radius:24px;padding:28px;box-shadow:0 18px 55px #00000012}
 h1{margin:0 0 6px;font-size:34px}.sub{margin:0 0 26px;color:#666}.field{margin:18px 0}label{display:block;font-weight:700;margin-bottom:8px}input{width:100%;padding:15px;border:1px solid #c9c9c3;border-radius:13px;font-size:18px}
-button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.bar{height:10px;background:#e9e9e4;border-radius:99px;overflow:hidden}.fill{height:100%;width:0;background:#171717;transition:width .35s}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.done{display:none;margin-top:18px}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.progress-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:10px}.progress-title{font-weight:800}.percent{font-variant-numeric:tabular-nums;font-weight:800;color:#555}.bar{height:14px;background:#e9e9e4;border-radius:99px;overflow:hidden;position:relative}.fill{height:100%;width:0;background:linear-gradient(90deg,#111,#4d4d4d);transition:width .65s cubic-bezier(.2,.8,.2,1);position:relative}.fill:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 25%,#ffffff55 45%,transparent 65%);animation:shine 1.6s linear infinite}@keyframes shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}.stages{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:9px}.stage{height:4px;border-radius:99px;background:#e9e9e4}.stage.active{background:#555}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.done{display:none;margin-top:18px}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
 </style></head><body><main class="card"><h1>Remedia</h1><p class="sub">REINVENT4 → GNINA → ADMET</p>
 <form id="form"><div class="field"><label for="u">UniProt ID</label><input id="u" value="P00918" autocomplete="off" required pattern="[A-Za-z0-9-]{4,16}"></div>
 <div class="field"><label for="n">Molekül sayısı</label><input id="n" type="number" value="20" min="5" max="100" step="5" required></div>
 <button id="start" type="submit">Remedia’yı Başlat</button><p class="muted">İlk REINVENT çalıştırması birkaç dakika sürebilir; sonraki çalıştırmalarda kurulum tekrar kullanılacaktır.</p></form>
-<section id="progress" class="progress"><div class="bar"><div id="fill" class="fill"></div></div><div id="step" class="step"><span class="spinner"></span> Hazırlanıyor</div><div id="message" class="muted"></div><div id="error"></div></section>
+<section id="progress" class="progress"><div class="progress-head"><div class="progress-title">İşlem ilerliyor</div><div id="percent" class="percent">0%</div></div><div class="bar"><div id="fill" class="fill"></div></div><div class="stages"><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div></div><div id="step" class="step"><span class="spinner"></span> Hazırlanıyor</div><div id="message" class="muted"></div><div id="error"></div></section>
 <section id="done" class="done"><a id="download" class="btn">Sonuçları indir</a><button class="retry" onclick="location.reload()">Yeni işlem</button></section>
 <script>
-const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done');
+const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done'),pct=document.querySelector('#percent'),stages=[...document.querySelectorAll('.stage')];
 form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value)})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
-async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();fill.style.width=((x.step||1)/5*100)+'%';msg.textContent=x.message||'';if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}step.innerHTML='<span class="spinner"></span> '+(x.step||1)+'/5';setTimeout(()=>poll(id),2500);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),4000);}}
+function paint(x){const p=Math.max(0,Math.min(100,Number(x.progress_percent??((x.step||1)/5*100))));fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';stages.forEach((el,i)=>el.classList.toggle('active',i<(x.step||1)));}
+async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=x.message||'';if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}step.innerHTML='<span class="spinner"></span> '+(x.step||1)+'/5';setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
 function showError(t){step.textContent='İşlem durdu';err.className='error';err.textContent=t;const b=document.createElement('button');b.className='retry';b.textContent='Tekrar dene';b.onclick=()=>location.reload();err.appendChild(b);}
 </script></main></body></html>'''
 
@@ -362,6 +382,7 @@ def web():
             job_id,
             state="queued",
             step=1,
+            progress_percent=3,
             message="GPU sırası bekleniyor",
             uniprot_id=uniprot,
             molecule_count=molecule_count,
