@@ -2,13 +2,6 @@
 
 Deploy:
     modal deploy modal/remedia_web_v2.py
-
-Changes vs the first web version:
-- no destructive rsync --delete
-- REINVENT4 lives on the persistent Volume at /workspace/REINVENT4
-- the worker runs from /workspace so REINVENT is reused on later jobs
-- async Modal APIs are used by the web endpoint
-- notebook widgets are suppressed when the existing pipeline is loaded
 """
 from __future__ import annotations
 
@@ -138,6 +131,19 @@ def _write_job(job_id: str, **changes) -> None:
     volume.commit()
 
 
+def _artifact_path(value: str | None) -> Path | None:
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = VOLUME_PATH / path
+    path = path.resolve()
+    root = VOLUME_PATH.resolve()
+    if path != root and root not in path.parents:
+        return None
+    return path
+
+
 class _ProgressStream(io.TextIOBase):
     """Capture pipeline logs without stalling GNINA on frequent Volume commits."""
 
@@ -163,16 +169,11 @@ class _ProgressStream(io.TextIOBase):
     ) -> None:
         target = max(self.percent, min(percent, 96))
         now = time.monotonic()
-        significant = (
-            step != self.last_committed_step
-            or target >= self.last_committed_percent + 3
-        )
+        significant = step != self.last_committed_step or target >= self.last_committed_percent + 3
         due = now - self.last_commit_at >= self.COMMIT_INTERVAL_SECONDS
         self.percent = target
-
         if not (force or significant or due):
             return
-
         _write_job(
             self.job_id,
             state="running",
@@ -199,31 +200,21 @@ class _ProgressStream(io.TextIOBase):
 
     def write(self, text: str) -> int:
         self.buffer += text
-        if len(self.buffer) > 14000:
-            self.buffer = self.buffer[-14000:]
+        if len(self.buffer) > 50000:
+            self.buffer = self.buffer[-50000:]
         low = text.lower()
         clean = text.strip()
 
         if "pocket" in low or "fpocket" in low:
             self._advance(18, "Bağlanma cebi belirleniyor", 2)
         elif "reinvent" in low or "sampling" in low or "prior" in low:
-            self._advance(
-                36,
-                clean[-180:] if clean else "REINVENT4 molekül üretiyor",
-                3,
-            )
+            self._advance(36, clean[-180:] if clean else "REINVENT4 molekül üretiyor", 3)
         elif "[1/2]" in low or "gnina] fast" in low or "fast batch" in low:
             self._start_gnina_phase("fast", 58, "GNINA hızlı tarama yapıyor")
         elif "[2/2]" in low or "gnina] accurate" in low or "accurate batch" in low:
-            self._start_gnina_phase(
-                "accurate",
-                78,
-                "GNINA ayrıntılı doğrulama yapıyor",
-            )
+            self._start_gnina_phase("accurate", 78, "GNINA ayrıntılı doğrulama yapıyor")
         elif "gnina" in low or "docking" in low:
-            message = "GNINA docking yapıyor"
-            if "tamamlandı" in low and clean:
-                message = clean[-180:]
+            message = clean[-180:] if "tamamlandı" in low and clean else "GNINA docking yapıyor"
             self._advance(self._gnina_percent(), message, 4)
         elif "admet" in low or "sıral" in low or "zip" in low:
             self._advance(92, "ADMET ve sonuç dosyaları hazırlanıyor", 5, force=True)
@@ -234,7 +225,7 @@ class _ProgressStream(io.TextIOBase):
 
 
 def _load_pipeline():
-    """Load the current tested notebook pipeline while hiding widget output."""
+    """Load the current notebook pipeline while suppressing notebook widgets."""
     notebook_path = REPO_PATH / "notebooks" / "remedia_modal.ipynb"
     notebook = json.loads(notebook_path.read_text())
     code = "\n\n".join(
@@ -262,7 +253,6 @@ def _load_pipeline():
 
 
 def _prepare_reinvent_location() -> None:
-    """Keep REINVENT outside the repo and on the persistent Volume."""
     old_candidates = [
         REPO_PATH / "notebooks" / "REINVENT4",
         Path("/root/REINVENT4"),
@@ -345,20 +335,36 @@ def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
         if result_dir is None:
             raise RuntimeError("İşlem tamamlandı ancak sonuç klasörü bulunamadı.")
 
-        zip_path = Path(
-            shutil.make_archive(str(result_dir), "zip", root_dir=result_dir)
+        stream._advance(94, "Açıklamalı sonuç raporu hazırlanıyor", 5, force=True)
+        from result_report import build_result_package
+
+        report_info = build_result_package(
+            result_dir,
+            target_uniprot=uniprot_id,
+            requested_molecules=molecule_count,
+            settings=settings,
+            pipeline_log=stream.buffer,
+            job_id=job_id,
         )
 
+        zip_path = Path(shutil.make_archive(str(result_dir), "zip", root_dir=result_dir))
+        candidate_count = int(report_info.get("candidate_count", 0))
+        scored_count = int(report_info.get("scored_candidate_count", 0))
         _write_job(
             job_id,
             state="done",
             step=5,
             progress_percent=100,
-            message="Tamamlandı",
+            message=f"Tamamlandı · {candidate_count} aday, {scored_count} docking skoru",
             result_zip=str(zip_path.resolve()),
+            report_file=str(Path(report_info["report_path"]).resolve()),
+            report_available=True,
+            candidate_count=candidate_count,
+            scored_candidate_count=scored_count,
+            primary_candidate_table=report_info.get("primary_candidate_table"),
         )
     except Exception as exc:
-        technical = stream.buffer[-8000:] + "\n" + traceback.format_exc()
+        technical = stream.buffer[-12000:] + "\n" + traceback.format_exc()
         error_path = JOBS_PATH / f"{job_id}.error.txt"
         error_path.write_text(technical)
         message = str(exc).strip() or "Beklenmeyen bir hata oluştu."
@@ -379,20 +385,20 @@ HTML = r'''<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Remedia</title><style>
 :root{font-family:Inter,system-ui,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(560px,100%);background:#fff;border:1px solid #deded8;border-radius:24px;padding:28px;box-shadow:0 18px 55px #00000012}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(590px,100%);background:#fff;border:1px solid #deded8;border-radius:24px;padding:28px;box-shadow:0 18px 55px #00000012}
 h1{margin:0 0 6px;font-size:34px}.sub{margin:0 0 26px;color:#666}.field{margin:18px 0}label{display:block;font-weight:700;margin-bottom:8px}input{width:100%;padding:15px;border:1px solid #c9c9c3;border-radius:13px;font-size:18px}
-button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.progress-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:10px}.progress-title{font-weight:800}.percent{font-variant-numeric:tabular-nums;font-weight:800;color:#555}.bar{height:14px;background:#e9e9e4;border-radius:99px;overflow:hidden;position:relative}.fill{height:100%;width:0;background:linear-gradient(90deg,#111,#4d4d4d);transition:width .65s cubic-bezier(.2,.8,.2,1);position:relative}.fill:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 25%,#ffffff55 45%,transparent 65%);animation:shine 1.6s linear infinite}@keyframes shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}.stages{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:9px}.stage{height:4px;border-radius:99px;background:#e9e9e4}.stage.active{background:#555}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.done{display:none;margin-top:18px}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.btn.secondary{background:#ecece8;color:#171717;margin-bottom:10px}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.progress-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:10px}.progress-title{font-weight:800}.percent{font-variant-numeric:tabular-nums;font-weight:800;color:#555}.bar{height:14px;background:#e9e9e4;border-radius:99px;overflow:hidden;position:relative}.fill{height:100%;width:0;background:linear-gradient(90deg,#111,#4d4d4d);transition:width .65s cubic-bezier(.2,.8,.2,1);position:relative}.fill:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 25%,#ffffff55 45%,transparent 65%);animation:shine 1.6s linear infinite}@keyframes shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}.stages{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:9px}.stage{height:4px;border-radius:99px;background:#e9e9e4}.stage.active{background:#555}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.done{display:none;margin-top:18px}.done-note{padding:13px;background:#f6f6f3;border-radius:12px;margin-bottom:12px;color:#555}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
 </style></head><body><main class="card"><h1>Remedia</h1><p class="sub">REINVENT4 → GNINA → ADMET</p>
 <form id="form"><div class="field"><label for="u">UniProt ID</label><input id="u" value="P00918" autocomplete="off" required pattern="[A-Za-z0-9-]{4,16}"></div>
 <div class="field"><label for="n">Molekül sayısı</label><input id="n" type="number" value="20" min="5" max="100" step="5" required></div>
-<button id="start" type="submit">Remedia’yı Başlat</button><p class="muted">İlk REINVENT çalıştırması birkaç dakika sürebilir; sonraki çalıştırmalarda kurulum tekrar kullanılacaktır.</p></form>
+<button id="start" type="submit">Remedia’yı Başlat</button><p class="muted">Sonuç paketi açıklamalı HTML raporu, tekleştirilmiş aday tablosu, veri sözlüğü, çalışma ayarları ve teknik log içerecektir.</p></form>
 <section id="progress" class="progress"><div class="progress-head"><div class="progress-title">İşlem ilerliyor</div><div id="percent" class="percent">0%</div></div><div class="bar"><div id="fill" class="fill"></div></div><div class="stages"><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div></div><div id="step" class="step"><span class="spinner"></span> Hazırlanıyor</div><div id="message" class="muted"></div><div id="error"></div></section>
-<section id="done" class="done"><a id="download" class="btn">Sonuçları indir</a><button class="retry" onclick="location.reload()">Yeni işlem</button></section>
+<section id="done" class="done"><div id="doneNote" class="done-note">Açıklamalı rapor ve ham veriler hazır.</div><a id="report" class="btn secondary" target="_blank">Raporu tarayıcıda aç</a><a id="download" class="btn">Tam sonuç paketini indir</a><button class="retry" onclick="location.reload()">Yeni işlem</button></section>
 <script>
 const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done'),pct=document.querySelector('#percent'),stages=[...document.querySelectorAll('.stage')];
 form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value)})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
 function paint(x){const p=Math.max(0,Math.min(100,Number(x.progress_percent??((x.step||1)/5*100))));fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';stages.forEach((el,i)=>el.classList.toggle('active',i<(x.step||1)));}
-async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=x.message||'';if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}step.innerHTML='<span class="spinner"></span> '+(x.step||1)+'/5';setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
+async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=x.message||'';if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;document.querySelector('#report').href='/report/'+id;document.querySelector('#doneNote').textContent=`${x.candidate_count??0} aday bulundu; ${x.scored_candidate_count??0} aday için docking skoru okundu.`;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}step.innerHTML='<span class="spinner"></span> '+(x.step||1)+'/5';setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
 function showError(t){step.textContent='İşlem durdu';err.className='error';err.textContent=t;const b=document.createElement('button');b.className='retry';b.textContent='Tekrar dene';b.onclick=()=>location.reload();err.appendChild(b);}
 </script></main></body></html>'''
 
@@ -446,30 +452,53 @@ def web():
         await run_job.spawn.aio(job_id, uniprot, molecule_count)
         return {"job_id": job_id}
 
-    @api.get("/status/{job_id}")
-    async def status(job_id: str):
+    async def _read_job(job_id: str) -> dict:
         await volume.reload.aio()
         path = _job_file(job_id)
         if not path.exists():
             raise HTTPException(404, "İş bulunamadı.")
         return json.loads(path.read_text())
 
+    @api.get("/status/{job_id}")
+    async def status(job_id: str):
+        return await _read_job(job_id)
+
     @api.get("/download/{job_id}")
     async def download(job_id: str):
-        await volume.reload.aio()
-        path = _job_file(job_id)
-        if not path.exists():
-            raise HTTPException(404, "İş bulunamadı.")
-        data = json.loads(path.read_text())
-        rel = data.get("result_zip")
-        if data.get("state") != "done" or not rel:
+        data = await _read_job(job_id)
+        file_path = _artifact_path(data.get("result_zip"))
+        if data.get("state") != "done" or file_path is None:
             raise HTTPException(409, "Sonuç henüz hazır değil.")
-        file_path = Path(rel)
-        if not file_path.is_absolute():
-            file_path = VOLUME_PATH / file_path
-
         if not file_path.exists():
             raise HTTPException(404, "Sonuç dosyası bulunamadı.")
         return FileResponse(file_path, filename=file_path.name, media_type="application/zip")
+
+    @api.get("/report/{job_id}", response_class=HTMLResponse)
+    async def report(job_id: str):
+        data = await _read_job(job_id)
+        report_path = _artifact_path(data.get("report_file"))
+        if data.get("state") != "done" or report_path is None:
+            raise HTTPException(409, "Rapor henüz hazır değil.")
+        if not report_path.is_file():
+            raise HTTPException(404, "Rapor dosyası bulunamadı.")
+        report_html = report_path.read_text(encoding="utf-8")
+        report_html = report_html.replace(
+            "src='top_molecules.png'",
+            f"src='/report-asset/{job_id}/top_molecules.png'",
+        )
+        return HTMLResponse(report_html)
+
+    @api.get("/report-asset/{job_id}/{filename}")
+    async def report_asset(job_id: str, filename: str):
+        if Path(filename).name != filename:
+            raise HTTPException(400, "Geçersiz dosya adı.")
+        data = await _read_job(job_id)
+        report_path = _artifact_path(data.get("report_file"))
+        if report_path is None:
+            raise HTTPException(404, "Rapor bulunamadı.")
+        asset = report_path.parent / filename
+        if not asset.is_file():
+            raise HTTPException(404, "Rapor görseli bulunamadı.")
+        return FileResponse(asset)
 
     return api
