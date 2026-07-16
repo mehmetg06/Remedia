@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import re
 import subprocess
 import time
@@ -25,8 +26,8 @@ DEFAULT_GNINA_PATH = "/usr/local/bin/gnina"
 
 MODE_PROFILES = {
     PROFILE_BALANCED: {
-        MODE_FAST: dict(cnn="fast", cnn_scoring="rescore", exhaustiveness=2, num_modes=1),
-        MODE_ACCURATE: dict(cnn=None, cnn_scoring="rescore", exhaustiveness=4, num_modes=1),
+        MODE_FAST: dict(cnn="fast", cnn_scoring="rescore", exhaustiveness=4, num_modes=1),
+        MODE_ACCURATE: dict(cnn=None, cnn_scoring="rescore", exhaustiveness=8, num_modes=3),
     },
     PROFILE_FINAL: {
         MODE_FAST: dict(cnn="fast", cnn_scoring="rescore", exhaustiveness=4, num_modes=1),
@@ -59,6 +60,13 @@ def _flags(mode, profile):
     return MODE_PROFILES[profile][mode]
 
 
+def _gnina_cpu_count() -> int:
+    try:
+        return max(1, int(os.environ.get("GNINA_CPU", "8")))
+    except (TypeError, ValueError):
+        return 8
+
+
 def build_gnina_command(gnina_path, receptor, ligand, center, size, mode=MODE_FAST,
                         out_path=None, seed=42, extra_args=None,
                         profile=PROFILE_BALANCED):
@@ -67,7 +75,8 @@ def build_gnina_command(gnina_path, receptor, ligand, center, size, mode=MODE_FA
            "--center_x", str(center[0]), "--center_y", str(center[1]),
            "--center_z", str(center[2]), "--size_x", str(size[0]),
            "--size_y", str(size[1]), "--size_z", str(size[2]),
-           "--cnn_scoring", flags["cnn_scoring"]]
+           "--cnn_scoring", flags["cnn_scoring"],
+           "--cpu", str(_gnina_cpu_count())]
     if flags["cnn"]:
         cmd += ["--cnn", flags["cnn"]]
     cmd += ["--exhaustiveness", str(flags["exhaustiveness"]),
@@ -211,6 +220,7 @@ def dock_batch_with_gnina(receptor, prepared_ligands, center, size, mode=MODE_FA
     flags = _flags(mode, profile)
     print(
         f"[GNINA] {mode}: {len(names)} ligand, "
+        f"cpu={_gnina_cpu_count()}, "
         f"exhaustiveness={flags['exhaustiveness']}, "
         f"num_modes={flags['num_modes']}",
         flush=True,
@@ -348,10 +358,12 @@ def run_single_mode_screening(molecules, receptor, center, size, mode=MODE_FAST,
                               prepare_fn=prepare_ligand_sdf,
                               batch_dock_fn=dock_batch_with_gnina,
                               profile=PROFILE_BALANCED):
-    prepared, failures = prepare_ligand_library(molecules, Path(out_dir) / "prepared", prepare_fn)
+    out_dir = Path(out_dir)
+    prepared, failures = prepare_ligand_library(molecules, out_dir / "prepared", prepare_fn)
+    receptor = _prepared_receptor(receptor, out_dir / "shared_receptor")
     log_fn(f"[{mode.upper()}] {len(prepared)} ligand tek GNINA batch sürecinde")
     batch = batch_dock_fn(receptor, prepared, center, size, mode=mode,
-                          gnina_path=gnina_path, out_dir=Path(out_dir) / mode,
+                          gnina_path=gnina_path, out_dir=out_dir / mode,
                           seed=seed, extra_args=extra_args, timeout=timeout, profile=profile)
     results = _ordered_results(molecules, prepared, failures, mode, batch)
     _raise_if_no_scores(results, mode.upper())
@@ -366,6 +378,7 @@ def run_two_stage_screening(molecules, receptor, center, size,
                             profile=PROFILE_BALANCED):
     out_dir = Path(out_dir)
     prepared, failures = prepare_ligand_library(molecules, out_dir / "prepared", prepare_fn)
+    receptor = _prepared_receptor(receptor, out_dir / "shared_receptor")
     log_fn(f"[1/2] FAST batch: {len(prepared)} ligand, tek GNINA süreci")
     fast_batch = batch_dock_fn(receptor, prepared, center, size, mode=MODE_FAST,
                                gnina_path=gnina_path, out_dir=out_dir / "fast", seed=seed,
@@ -403,12 +416,14 @@ def benchmark_fast_vs_accurate(molecules, receptor, center, size,
                                prepare_fn=prepare_ligand_sdf,
                                batch_dock_fn=dock_batch_with_gnina,
                                profile=PROFILE_BALANCED):
-    prepared, _ = prepare_ligand_library(molecules, Path(out_dir) / "prepared", prepare_fn)
+    out_dir = Path(out_dir)
+    prepared, _ = prepare_ligand_library(molecules, out_dir / "prepared", prepare_fn)
+    receptor = _prepared_receptor(receptor, out_dir / "shared_receptor")
     common = dict(receptor=receptor, prepared_ligands=prepared, center=center, size=size,
                   gnina_path=gnina_path, seed=seed, extra_args=extra_args,
                   timeout=timeout, profile=profile)
-    fast = batch_dock_fn(mode=MODE_FAST, out_dir=Path(out_dir) / "fast", **common)
-    accurate = batch_dock_fn(mode=MODE_ACCURATE, out_dir=Path(out_dir) / "accurate", **common)
+    fast = batch_dock_fn(mode=MODE_FAST, out_dir=out_dir / "fast", **common)
+    accurate = batch_dock_fn(mode=MODE_ACCURATE, out_dir=out_dir / "accurate", **common)
     _raise_if_no_scores(fast, "FAST benchmark")
     _raise_if_no_scores(accurate, "ACCURATE benchmark")
     f, a = {r.ligand: r for r in fast}, {r.ligand: r for r in accurate}
