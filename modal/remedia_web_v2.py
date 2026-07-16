@@ -42,7 +42,16 @@ image = (
         "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04",
         add_python="3.11",
     )
-    .apt_install("bzip2", "ca-certificates", "curl", "git", "rsync")
+    .apt_install(
+        "bzip2",
+        "ca-certificates",
+        "curl",
+        "git",
+        "rsync",
+        "libxrender1",
+        "libxext6",
+        "libsm6",
+    )
     .pip_install_from_requirements(str(REPO_ROOT / "modal" / "requirements.txt"))
     .pip_install("fastapi>=0.115", "python-multipart>=0.0.18")
     .run_commands(
@@ -286,6 +295,7 @@ def run_job(job_id: str, uniprot_id: str, molecule_count: int) -> None:
             state="error",
             message=message,
             technical_log=str(error_path.relative_to(VOLUME_PATH)),
+            technical_excerpt=technical[-3500:],
         )
     finally:
         os.chdir(original_cwd)
@@ -297,7 +307,7 @@ HTML = r'''<!doctype html>
 :root{font-family:Inter,system-ui,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(560px,100%);background:#fff;border:1px solid #deded8;border-radius:24px;padding:28px;box-shadow:0 18px 55px #00000012}
 h1{margin:0 0 6px;font-size:34px}.sub{margin:0 0 26px;color:#666}.field{margin:18px 0}label{display:block;font-weight:700;margin-bottom:8px}input{width:100%;padding:15px;border:1px solid #c9c9c3;border-radius:13px;font-size:18px}
-button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.bar{height:10px;background:#e9e9e4;border-radius:99px;overflow:hidden}.fill{height:100%;width:0;background:#171717;transition:width .35s}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px}.done{display:none;margin-top:18px}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.bar{height:10px;background:#e9e9e4;border-radius:99px;overflow:hidden}.fill{height:100%;width:0;background:#171717;transition:width .35s}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.done{display:none;margin-top:18px}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
 </style></head><body><main class="card"><h1>Remedia</h1><p class="sub">REINVENT4 → GNINA → ADMET</p>
 <form id="form"><div class="field"><label for="u">UniProt ID</label><input id="u" value="P00918" autocomplete="off" required pattern="[A-Za-z0-9-]{4,16}"></div>
 <div class="field"><label for="n">Molekül sayısı</label><input id="n" type="number" value="20" min="5" max="100" step="5" required></div>
@@ -307,8 +317,8 @@ button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:1
 <script>
 const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done');
 form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value)})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
-async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();fill.style.width=((x.step||1)/5*100)+'%';msg.textContent=x.message||'';if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;return;}if(x.state==='error'){showError(x.message||'İşlem başarısız');return;}step.innerHTML='<span class="spinner"></span> '+(x.step||1)+'/5';setTimeout(()=>poll(id),2500);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),4000);}}
-function showError(t){step.textContent='İşlem durdu';err.className='error';err.innerHTML=t+'<button class="retry" onclick="location.reload()">Tekrar dene</button>';}
+async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();fill.style.width=((x.step||1)/5*100)+'%';msg.textContent=x.message||'';if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}step.innerHTML='<span class="spinner"></span> '+(x.step||1)+'/5';setTimeout(()=>poll(id),2500);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),4000);}}
+function showError(t){step.textContent='İşlem durdu';err.className='error';err.textContent=t;const b=document.createElement('button');b.className='retry';b.textContent='Tekrar dene';b.onclick=()=>location.reload();err.appendChild(b);}
 </script></main></body></html>'''
 
 
