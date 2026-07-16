@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 import uuid
 from pathlib import Path
@@ -60,7 +61,7 @@ image = (
         "micromamba create -y -p /opt/remedia-fpocket -c conda-forge -c bioconda fpocket",
         "micromamba clean --all --yes",
         "curl --fail --location --retry 3 "
-        "https://github.com/gnina/gnina/releases/download/v1.3/gnina "
+        "https://github.com/gnina/gnina/releases/download/v1.3.2/gnina.1.3.2.cuda12.8 "
         "--output /usr/local/bin/gnina",
         "chmod 0755 /usr/local/bin/gnina",
         "mkdir -p /opt/remedia-nvidia-libs && "
@@ -138,13 +139,40 @@ def _write_job(job_id: str, **changes) -> None:
 
 
 class _ProgressStream(io.TextIOBase):
+    """Capture pipeline logs without stalling GNINA on frequent Volume commits."""
+
+    COMMIT_INTERVAL_SECONDS = 3.0
+
     def __init__(self, job_id: str):
         self.job_id = job_id
         self.buffer = ""
         self.percent = 8
+        self.last_committed_percent = 8
+        self.last_committed_step = 1
+        self.last_commit_at = 0.0
+        self.gnina_phase = ""
+        self.gnina_phase_started_at = time.monotonic()
 
-    def _advance(self, percent: int, message: str, step: int) -> None:
-        self.percent = max(self.percent, min(percent, 96))
+    def _advance(
+        self,
+        percent: int,
+        message: str,
+        step: int,
+        *,
+        force: bool = False,
+    ) -> None:
+        target = max(self.percent, min(percent, 96))
+        now = time.monotonic()
+        significant = (
+            step != self.last_committed_step
+            or target >= self.last_committed_percent + 3
+        )
+        due = now - self.last_commit_at >= self.COMMIT_INTERVAL_SECONDS
+        self.percent = target
+
+        if not (force or significant or due):
+            return
+
         _write_job(
             self.job_id,
             state="running",
@@ -152,6 +180,22 @@ class _ProgressStream(io.TextIOBase):
             progress_percent=self.percent,
             message=message,
         )
+        self.last_commit_at = now
+        self.last_committed_percent = self.percent
+        self.last_committed_step = step
+
+    def _start_gnina_phase(self, phase: str, percent: int, message: str) -> None:
+        self.gnina_phase = phase
+        self.gnina_phase_started_at = time.monotonic()
+        self._advance(percent, message, 4, force=True)
+
+    def _gnina_percent(self) -> int:
+        elapsed = max(0.0, time.monotonic() - self.gnina_phase_started_at)
+        if self.gnina_phase == "fast":
+            return min(76, 58 + int(elapsed / 7.0))
+        if self.gnina_phase == "accurate":
+            return min(90, 78 + int(elapsed / 10.0))
+        return max(self.percent, 54)
 
     def write(self, text: str) -> int:
         self.buffer += text
@@ -163,15 +207,26 @@ class _ProgressStream(io.TextIOBase):
         if "pocket" in low or "fpocket" in low:
             self._advance(18, "Bağlanma cebi belirleniyor", 2)
         elif "reinvent" in low or "sampling" in low or "prior" in low:
-            self._advance(36, clean[-180:] if clean else "REINVENT4 molekül üretiyor", 3)
+            self._advance(
+                36,
+                clean[-180:] if clean else "REINVENT4 molekül üretiyor",
+                3,
+            )
         elif "[1/2]" in low or "gnina] fast" in low or "fast batch" in low:
-            self._advance(58, "GNINA hızlı tarama yapıyor", 4)
+            self._start_gnina_phase("fast", 58, "GNINA hızlı tarama yapıyor")
         elif "[2/2]" in low or "gnina] accurate" in low or "accurate batch" in low:
-            self._advance(78, "GNINA ayrıntılı doğrulama yapıyor", 4)
+            self._start_gnina_phase(
+                "accurate",
+                78,
+                "GNINA ayrıntılı doğrulama yapıyor",
+            )
         elif "gnina" in low or "docking" in low:
-            self._advance(min(self.percent + 1, 88), clean[-180:] if clean else "GNINA docking yapıyor", 4)
+            message = "GNINA docking yapıyor"
+            if "tamamlandı" in low and clean:
+                message = clean[-180:]
+            self._advance(self._gnina_percent(), message, 4)
         elif "admet" in low or "sıral" in low or "zip" in low:
-            self._advance(92, "ADMET ve sonuç dosyaları hazırlanıyor", 5)
+            self._advance(92, "ADMET ve sonuç dosyaları hazırlanıyor", 5, force=True)
         return len(text)
 
     def flush(self) -> None:
