@@ -73,6 +73,7 @@ image = (
             "PYTHONUNBUFFERED": "1",
             "REMEDIA_PREBUILT_IMAGE": "1",
             "REMEDIA_WORKSPACE": "/workspace",
+            "BOLTZ_CACHE": "/workspace/boltz_cache",
         }
     )
     .add_local_dir(
@@ -275,6 +276,8 @@ class _ProgressStream(io.TextIOBase):
             self._start_gnina_phase("fast", 58, "GNINA hızlı tarama yapıyor")
         elif "[2/2]" in low or "gnina] accurate" in low or "accurate batch" in low:
             self._start_gnina_phase("accurate", 78, "GNINA ayrıntılı doğrulama yapıyor")
+        elif "boltz" in low:
+            self._advance(68, clean[-180:] if clean else "Boltz-2 kompleks ve afinite tahmini yapıyor", 4)
         elif "gnina" in low or "docking" in low:
             message = clean[-180:] if "tamamlandı" in low and clean else "GNINA docking yapıyor"
             self._advance(self._gnina_percent(), message, 4)
@@ -510,6 +513,7 @@ button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:1
 <div class="field"><label>Poz motoru (Pose Engine)</label><div class="choices">
 <label class="choice"><input type="radio" name="pose" value="gnina" checked> GNINA</label>
 <label class="choice"><input type="radio" name="pose" value="diffdock"> DiffDock</label>
+<label class="choice"><input type="radio" name="pose" value="boltz2"> Boltz-2</label>
 <label class="choice"><input type="radio" name="pose" value="hybrid"> Hybrid Validation</label>
 </div></div>
 <button id="start" type="submit">Remedia’yı Başlat</button><p class="muted">Sonuç paketi açıklamalı HTML raporu, tekleştirilmiş aday tablosu, veri sözlüğü, çalışma ayarları ve teknik log içerecektir.</p></form>
@@ -563,7 +567,7 @@ def web():
         if generator not in {"reinvent4", "molmim", "hybrid"}:
             generator = "reinvent4"
         pose_engine = str(payload.get("pose_engine", "gnina")).strip().lower()
-        if pose_engine not in {"gnina", "diffdock", "hybrid"}:
+        if pose_engine not in {"gnina", "diffdock", "boltz2", "hybrid"}:
             pose_engine = "gnina"
 
         job_id = uuid.uuid4().hex
