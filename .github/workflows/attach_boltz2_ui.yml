@@ -1,0 +1,56 @@
+name: Attach Boltz-2 to Modal UI
+
+on:
+  push:
+    paths:
+      - '.github/workflows/attach_boltz2_ui.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[boltz-ui-done]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch Modal app
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('modal/remedia_web_v2.py')
+          t = p.read_text(encoding='utf-8')
+          t = t.replace(
+              '"REMEDIA_WORKSPACE": "/workspace",',
+              '"REMEDIA_WORKSPACE": "/workspace",\n            "BOLTZ_CACHE": "/workspace/boltz_cache",',
+              1,
+          )
+          t = t.replace(
+              'elif "gnina" in low or "docking" in low:',
+              'elif "boltz" in low:\n            self._advance(68, clean[-180:] if clean else "Boltz-2 kompleks ve afinite tahmini yapıyor", 4)\n        elif "gnina" in low or "docking" in low:',
+              1,
+          )
+          t = t.replace(
+              '<label class="choice"><input type="radio" name="pose" value="diffdock"> DiffDock</label>\n<label class="choice"><input type="radio" name="pose" value="hybrid"> Hybrid Validation</label>',
+              '<label class="choice"><input type="radio" name="pose" value="diffdock"> DiffDock</label>\n<label class="choice"><input type="radio" name="pose" value="boltz2"> Boltz-2</label>\n<label class="choice"><input type="radio" name="pose" value="hybrid"> Hybrid Validation</label>',
+              1,
+          )
+          t = t.replace(
+              'if pose_engine not in {"gnina", "diffdock", "hybrid"}:',
+              'if pose_engine not in {"gnina", "diffdock", "boltz2", "hybrid"}:',
+              1,
+          )
+          p.write_text(t, encoding='utf-8')
+          PY
+      - name: Sanity checks
+        run: |
+          python -m py_compile src/pose/boltz_predictor.py src/pose/factory.py modal/remedia_web_v2.py
+          grep -q 'value="boltz2"' modal/remedia_web_v2.py
+          grep -q 'BOLTZ_CACHE' modal/remedia_web_v2.py
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add modal/remedia_web_v2.py
+          git commit -m 'Expose Boltz-2 in Modal UI [boltz-ui-done]'
+          git push
