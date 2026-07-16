@@ -1,0 +1,141 @@
+name: Fix scientific report data merge
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fix_scientific_report_data.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[report-fix-done]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Patch scientific report data wiring
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/scientific_report.py')
+          text = path.read_text(encoding='utf-8')
+
+          old_merge = '''    for row in admet:
+              name = str(_first(row, "ligand", "molecule", "name") or "")
+              if name and name not in props:
+                  props[name] = row
+          '''
+          new_merge = '''    for row in admet:
+              name = str(_first(row, "ligand", "molecule", "name") or "")
+              if name:
+                  # ADMET is the authoritative source for MW/LogP/TPSA/HBD/HBA,
+                  # pass/fail and violations.  candidate_overview may contain the
+                  # same columns as empty strings, so merge non-empty ADMET values
+                  # instead of discarding the row when the molecule already exists.
+                  merged = props.setdefault(name, {})
+                  merged.update({key: value for key, value in row.items()
+                                 if value not in (None, "")})
+          '''
+          if old_merge not in text:
+              raise SystemExit('Expected ADMET merge block was not found')
+          text = text.replace(old_merge, new_merge, 1)
+
+          old_narrative = '''    if admet in {"true", "pass", "geçti", "gecti", "ok", "passed"}:
+              bits.append("ADMET filtresini geçiyor" + (f" ({viol} ihlal notu)" if viol not in ("", "-") else ""))
+          '''
+          new_narrative = '''    if admet in {"true", "pass", "geçti", "gecti", "ok", "passed"}:
+              if viol not in ("", "-"):
+                  bits.append(
+                      "Lipinski/Veber ön filtresini geçiyor "
+                      f"(kuralların izin verdiği tek ihlal: {viol})"
+                  )
+              else:
+                  bits.append("Lipinski/Veber ön filtresini ihlalsiz geçiyor")
+          elif admet in {"false", "fail", "failed", "geçmedi", "gecmedi"}:
+              bits.append(
+                  "Lipinski/Veber ön filtresini geçemiyor"
+                  + (f" ({viol})" if viol not in ("", "-") else "")
+              )
+          '''
+          if old_narrative not in text:
+              raise SystemExit('Expected ADMET narrative block was not found')
+          text = text.replace(old_narrative, new_narrative, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Add regression tests
+        run: |
+          cat > tests/test_scientific_report_admet_merge.py <<'PY'
+          import csv
+          import sys
+          import tempfile
+          import unittest
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+          import scientific_report as sr
+
+
+          def write_csv(path, rows):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open('w', newline='', encoding='utf-8') as handle:
+                  writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
+                  writer.writeheader()
+                  writer.writerows(rows)
+
+
+          class TestScientificReportAdmetMerge(unittest.TestCase):
+              def test_admet_values_override_blank_overview_fields(self):
+                  with tempfile.TemporaryDirectory() as tmp:
+                      root = Path(tmp)
+                      write_csv(root / 'remedia_ranking.csv', [{
+                          'rank': '1', 'molecule': 'mol_001', 'smiles': 'CC',
+                          'remedia_score': '0.8', 'affinity_kcal_mol': '-6.2',
+                          'druglikeness_score': '0.7', 'diversity_score': '1.0',
+                      }])
+                      write_csv(root / '00_REMEDIA_REPORT' / 'candidate_overview.csv', [{
+                          'molecule': 'mol_001', 'smiles': 'CC', 'mw': '', 'logp': '',
+                          'tpsa': '', 'hbd': '', 'hba': '', 'admet_status': '',
+                          'violations': '',
+                      }])
+                      write_csv(root / 'admet_results.csv', [{
+                          'ligand': 'mol_001', 'MW': '512.3', 'LogP': '4.2',
+                          'TPSA': '81.5', 'HBD': '2', 'HBA': '6',
+                          'pass': 'True', 'violations': 'MW>500',
+                      }])
+                      candidate = sr.load_candidates(root)[0]
+                      self.assertEqual(candidate['mw'], 512.3)
+                      self.assertEqual(candidate['logp'], 4.2)
+                      self.assertEqual(candidate['tpsa'], 81.5)
+                      self.assertEqual(candidate['hbd'], 2.0)
+                      self.assertEqual(candidate['hba'], 6.0)
+                      self.assertEqual(candidate['admet_status'], 'True')
+                      self.assertEqual(candidate['violations'], 'MW>500')
+
+              def test_one_allowed_violation_is_explained_not_contradicted(self):
+                  text = sr.ranking_explanation({
+                      'rank': 1, 'remedia_score': 0.8,
+                      'affinity_kcal_mol': -6.2,
+                      'admet_status': 'True', 'violations': 'MW>500',
+                      'druglikeness_score': 0.7, 'diversity_score': 1.0,
+                  })
+                  self.assertIn('izin verdiği tek ihlal: MW>500', text)
+                  self.assertNotIn('ihlal notu', text)
+
+
+          if __name__ == '__main__':
+              unittest.main()
+          PY
+      - name: Run tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/scientific_report.py tests/test_scientific_report_admet_merge.py
+          git commit -m 'Fix scientific report ADMET property merge [report-fix-done]'
+          git push
