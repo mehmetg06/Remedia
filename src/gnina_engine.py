@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import import Path
 from statistics import mean, median
 
 from receptor_prep import ReceptorPreparationError, prepare_receptor_pdbqt
@@ -25,8 +25,8 @@ DEFAULT_GNINA_PATH = "/usr/local/bin/gnina"
 
 MODE_PROFILES = {
     PROFILE_BALANCED: {
-        MODE_FAST: dict(cnn="fast", cnn_scoring="rescore", exhaustiveness=4, num_modes=1),
-        MODE_ACCURATE: dict(cnn=None, cnn_scoring="rescore", exhaustiveness=8, num_modes=3),
+        MODE_FAST: dict(cnn="fast", cnn_scoring="rescore", exhaustiveness=2, num_modes=1),
+        MODE_ACCURATE: dict(cnn=None, cnn_scoring="rescore", exhaustiveness=4, num_modes=1),
     },
     PROFILE_FINAL: {
         MODE_FAST: dict(cnn="fast", cnn_scoring="rescore", exhaustiveness=4, num_modes=1),
