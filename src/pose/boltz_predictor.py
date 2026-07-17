@@ -3,9 +3,9 @@
 
 """Boltz-2 protein-ligand co-folding and affinity predictor.
 
-The implementation uses the official ``boltz predict`` CLI.  It runs candidates
-as a batch, uses the prepared receptor as a structural template, and records
-Boltz structure confidence plus binder probability and affinity predictions.
+Boltz has a NumPy <2 requirement while the main Remedia/REINVENT environment
+uses NumPy 2. To avoid dependency conflicts, Boltz is installed on first use in
+an isolated virtual environment persisted on the Modal Volume.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,6 +61,7 @@ class BoltzPredictor(BasePosePredictor):
         *,
         executable: str | None = None,
         cache_dir: str | Path | None = None,
+        env_dir: str | Path | None = None,
         use_msa_server: bool = False,
         use_potentials: bool = True,
         recycling_steps: int = 2,
@@ -68,11 +70,60 @@ class BoltzPredictor(BasePosePredictor):
     ) -> None:
         self.executable = executable or os.environ.get("BOLTZ_PATH", "boltz")
         self.cache_dir = Path(cache_dir or os.environ.get("BOLTZ_CACHE", "/workspace/boltz_cache"))
+        self.env_dir = Path(env_dir or os.environ.get("BOLTZ_ENV", "/workspace/boltz_env"))
         self.use_msa_server = use_msa_server
         self.use_potentials = use_potentials
         self.recycling_steps = recycling_steps
         self.sampling_steps = sampling_steps
         self._log = log_fn
+
+    def _ensure_executable(self, reporter: Any | None) -> str:
+        direct = shutil.which(self.executable)
+        if direct:
+            return direct
+
+        candidate = self.env_dir / "bin" / "boltz"
+        if candidate.is_file():
+            return str(candidate)
+
+        message = "Boltz-2 ayrı ortamı ilk kez kuruluyor; bu işlem yalnızca ilk koşuda uzun sürebilir"
+        self._log(message)
+        if reporter is not None:
+            reporter.log(message)
+
+        self.env_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(self.env_dir)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            python_bin = self.env_dir / "bin" / "python"
+            install = subprocess.run(
+                [
+                    str(python_bin),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "pip",
+                    "setuptools",
+                    "wheel",
+                    "boltz==2.2.1",
+                ],
+                text=True,
+                capture_output=True,
+            )
+        except Exception as exc:
+            raise BoltzUnavailable(f"Boltz-2 ayrı ortamı oluşturulamadı: {exc}") from exc
+
+        if install.returncode != 0:
+            detail = (install.stderr or install.stdout or "bilinmeyen hata")[-5000:]
+            raise BoltzUnavailable(f"Boltz-2 kurulumu başarısız: {detail}")
+        if not candidate.is_file():
+            raise BoltzUnavailable("Boltz-2 kuruldu ancak komut bulunamadı")
+        return str(candidate)
 
     def predict_pose(
         self,
@@ -86,9 +137,7 @@ class BoltzPredictor(BasePosePredictor):
         **kwargs: Any,
     ) -> PoseResult:
         del center, size, kwargs
-        executable = shutil.which(self.executable)
-        if not executable:
-            raise BoltzUnavailable("Boltz-2 kurulu değil; 'boltz' komutu bulunamadı")
+        executable = self._ensure_executable(reporter)
         receptor_path = Path(receptor or "")
         if not receptor_path.is_file():
             raise BoltzUnavailable(f"Boltz-2 reseptör PDB dosyasını bulamadı: {receptor}")
@@ -198,6 +247,7 @@ class BoltzPredictor(BasePosePredictor):
             metadata={
                 "actual_pose_engine": "boltz2",
                 "cache_dir": str(self.cache_dir),
+                "env_dir": str(self.env_dir),
                 "recycling_steps": self.recycling_steps,
                 "sampling_steps": self.sampling_steps,
                 "msa_mode": "server" if self.use_msa_server else "single_sequence",
