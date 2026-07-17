@@ -187,6 +187,7 @@ class BoltzPredictor(BasePosePredictor):
             "1",
             "--output_format",
             "pdb",
+            "--no_kernels",
             "--override",
         ]
         if self.use_potentials:
@@ -251,5 +252,6 @@ class BoltzPredictor(BasePosePredictor):
                 "recycling_steps": self.recycling_steps,
                 "sampling_steps": self.sampling_steps,
                 "msa_mode": "server" if self.use_msa_server else "single_sequence",
+                "kernels": "disabled",
             },
         )
