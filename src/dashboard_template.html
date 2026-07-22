@@ -20,6 +20,8 @@
     --accent-dim: rgba(94,234,212,0.14);
     --amber: #F0B23C;
     --coral: #F0725A;
+    --violet: #A78BFA;
+    --shadow: 0 24px 80px rgba(0,0,0,0.28);
   }
   *{box-sizing:border-box; margin:0; padding:0;}
   body{
@@ -43,9 +45,10 @@
     z-index: 0;
   }
 
-  .wrap{ max-width: 920px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1;}
+  .wrap{ max-width: 1080px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1;}
 
   header{ padding: 56px 0 40px; border-bottom: 1px solid var(--border); }
+  .glass{ background: linear-gradient(180deg, rgba(255,255,255,0.055), rgba(255,255,255,0.025)); border:1px solid var(--border); box-shadow: var(--shadow); backdrop-filter: blur(18px); }
   .eyebrow{
     font-family: 'IBM Plex Mono', monospace;
     font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
@@ -65,10 +68,16 @@
   .sub{ color: var(--text-muted); font-size: 15px; max-width: 540px; }
   .sub b{ color: var(--text); font-weight: 500; }
 
-  .hero-stats{ display:flex; gap: 36px; margin-top: 32px; flex-wrap: wrap; }
+  .hero-stats{ display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: 14px; margin-top: 32px; }
+  .hstat{ padding:16px; border-radius:16px; background:rgba(255,255,255,0.035); border:1px solid var(--border); }
   .hstat .num{ font-size: 28px; font-weight: 600; font-family: 'Space Grotesk', sans-serif; }
   .hstat .lbl{ font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px;}
   .hstat.good .num{ color: var(--accent); }
+  .summary-grid{ display:grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap:14px; }
+  .summary-card{ padding:18px; border-radius:18px; }
+  .summary-card .k{ color:var(--text-dim); font: 11px IBM Plex Mono, monospace; text-transform:uppercase; letter-spacing:.08em; }
+  .summary-card .v{ margin-top:8px; font: 600 26px Space Grotesk, sans-serif; }
+  .summary-card .hint{ color:var(--text-muted); font-size:12px; margin-top:4px; }
 
   section{ padding: 44px 0; border-bottom: 1px solid var(--border); }
   .sec-head{ display:flex; align-items:baseline; justify-content:space-between; margin-bottom: 24px; gap: 12px; flex-wrap: wrap;}
@@ -92,7 +101,7 @@
   .stage.done .stage-box{ border-color: rgba(94,234,212,0.3); background: linear-gradient(180deg, rgba(94,234,212,0.05), var(--bg-panel));}
 
   .pocket-card{
-    background: var(--bg-panel); border:1px solid var(--border); border-radius: 14px;
+    background: var(--bg-panel); border:1px solid var(--border); border-radius: 18px;
     padding: 24px; display:grid; grid-template-columns: 1.1fr 1fr; gap: 28px;
   }
   @media (max-width:640px){ .pocket-card{ grid-template-columns: 1fr; } }
@@ -133,16 +142,25 @@
   .bar-value .unit{ color: var(--text-dim); font-size:10.5px; margin-left:2px;}
   .bar-fill.qed-fallback{ background: repeating-linear-gradient(45deg, rgba(94,234,212,0.1), rgba(94,234,212,0.1) 4px, rgba(94,234,212,0.4) 4px, rgba(94,234,212,0.4) 8px); opacity: 0.8; border: 1px dashed rgba(94,234,212,0.5); }
 
-  table{ width:100%; border-collapse:collapse; font-size: 13px; }
+  .table-tools{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
+  .table-tools input,.table-tools select,.table-tools button{ background:var(--bg-panel); color:var(--text); border:1px solid var(--border); border-radius:10px; padding:10px 12px; font: 12px IBM Plex Mono, monospace; }
+  .table-tools input{ flex:1 1 220px; }
+  .table-tools button{ cursor:pointer; color:var(--accent); }
+  .table-wrap{ overflow:auto; border:1px solid var(--border); border-radius:16px; background:rgba(255,255,255,0.02); }
+  table{ width:100%; border-collapse:collapse; font-size: 13px; min-width:620px; }
   th{ text-align:left; font-family:'IBM Plex Mono',monospace; font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color: var(--text-dim); font-weight:500; padding: 0 12px 10px; border-bottom:1px solid var(--border);}
   td{ padding: 12px; border-bottom:1px solid var(--border); font-family:'IBM Plex Mono', monospace; }
   tr:last-child td{ border-bottom:none; }
-  td:first-child, th:first-child{ padding-left:0; }
+  td:first-child, th:first-child{ padding-left:12px; }
   .pill{ display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:600;}
   .pill.pass{ background: rgba(94,234,212,0.12); color: var(--accent); }
   .pill.pass::before{ content:'✓'; }
   .pill.fail{ background: rgba(240,114,90,0.12); color: var(--coral); }
 
+  .timing-grid{ display:grid; grid-template-columns: repeat(auto-fit,minmax(210px,1fr)); gap:12px; }
+  .timing-card{ display:flex; justify-content:space-between; gap:12px; padding:14px; border-radius:14px; background:var(--bg-panel); border:1px solid var(--border); font-family:IBM Plex Mono, monospace; font-size:12px; }
+  .timing-card b{ color:var(--accent); }
+  .empty-state,.chart-note{ color:var(--text-dim); font: 12px IBM Plex Mono, monospace; padding:12px; border:1px dashed var(--border-strong); border-radius:12px; }
   .next-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:16px;}
   .next-card{ background: var(--bg-panel); border:1px solid var(--border); border-radius:12px; padding:20px; }
   .next-card .n{ font-family:'IBM Plex Mono', monospace; color: var(--accent); font-size:12px; margin-bottom:10px;}
@@ -158,14 +176,23 @@
   <header>
     <div class="eyebrow">PPIF / CypD · UniProt {{UNIPROT}}</div>
     <h1>Reseptör Odaklı Docking <span>— Çalıştırma Özeti</span></h1>
-    <p class="sub">AlphaFold yapısından binding pocket tespitine, virtual screening'den ADMET filtresine kadar <b>uçtan uca doğrulanmış</b> ilk pipeline çalıştırması.</p>
-    <div class="hero-stats">
+    <p class="sub">AlphaFold yapısından binding pocket tespitine, virtual screening'den ADMET filtresine kadar <b>ölçümlenebilir, filtrelenebilir ve yeniden başlatmaya hazır</b> pipeline özeti.</p>
+    <div class="hero-stats glass">
       <div class="hstat good"><div class="num mono">{{AVG_PLDDT}}</div><div class="lbl">Ort. pLDDT</div></div>
       <div class="hstat good"><div class="num mono">{{ADMET_RATIO}}</div><div class="lbl">ADMET Geçti</div></div>
       <div class="hstat"><div class="num mono">{{BEST_AFFINITY}}</div><div class="lbl">En İyi Affinity (kcal/mol)</div></div>
-      <div class="hstat"><div class="num mono">{{POCKET_NAME}}</div><div class="lbl">Seçilen Cep</div></div>
+      <div class="hstat"><div class="num mono">{{TOTAL_RUNTIME}}</div><div class="lbl">Toplam Süre</div></div>
     </div>
   </header>
+
+  <section>
+    <div class="summary-grid">
+      <div class="summary-card glass"><div class="k">Top aday</div><div class="v">{{TOP_LIGAND}}</div><div class="hint">Affinity sıralamasında ilk molekül</div></div>
+      <div class="summary-card glass"><div class="k">Ortalama affinity</div><div class="v">{{MEAN_AFFINITY}}</div><div class="hint">kcal/mol, düşük değer daha iyi</div></div>
+      <div class="summary-card glass"><div class="k">ADMET başarı</div><div class="v">{{ADMET_PASS_PCT}}</div><div class="hint">{{ADMET_RATIO}} aday filtreyi geçti</div></div>
+      <div class="summary-card glass"><div class="k">Cep</div><div class="v">{{POCKET_NAME}}</div><div class="hint">Seçilen docking pocket</div></div>
+    </div>
+  </section>
 
   <section>
     <div class="sec-head">
@@ -187,7 +214,7 @@
       <div class="sec-title">Seçilen Cep — {{POCKET_NAME}}</div>
       <div class="sec-note">druggability rank #1</div>
     </div>
-    <div class="pocket-card">
+    <div class="pocket-card glass">
       <div class="pocket-viz">
         <div class="ring ring2"></div>
         <div class="ring ring1"></div>
@@ -222,15 +249,32 @@
 
   <section>
     <div class="sec-head">
-      <div class="sec-title">ADMET — Lipinski/Veber</div>
-      <div class="sec-note">{{ADMET_RATIO}} filtreyi geçti</div>
+      <div class="sec-title">Çalışma Süresi</div>
+      <div class="sec-note">progress.jsonl ölçümleri</div>
     </div>
-    <table>
-      <thead><tr><th>Ligand</th><th>Affinity</th><th>Durum</th></tr></thead>
-      <tbody>
+    <div class="timing-grid">
+{{TIMING_CARDS}}
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <div class="sec-title">ADMET — Lipinski/Veber</div>
+      <div class="sec-note"><span id="visible-count">{{INITIAL_ROWS}}</span>/{{N_LIGANDS}} gösteriliyor · {{ADMET_RATIO}} geçti</div>
+    </div>
+    <div class="table-tools">
+      <input id="candidate-search" type="search" placeholder="Ligand ara..." autocomplete="off">
+      <select id="status-filter"><option value="all">Tümü</option><option value="pass">Geçenler</option><option value="fail">Kalanlar</option></select>
+      <button id="show-all" type="button">Tümünü göster</button>
+    </div>
+    <div class="table-wrap">
+      <table id="candidate-table">
+        <thead><tr><th>#</th><th>Ligand</th><th>Affinity</th><th>Durum</th></tr></thead>
+        <tbody>
 {{ADMET_ROWS}}
-      </tbody>
-    </table>
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <section style="border-bottom:none;">
@@ -261,8 +305,35 @@
   window.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('.bar-fill').forEach((el, i) => {
       const w = el.getAttribute('data-w');
-      setTimeout(() => { el.style.width = w + '%'; }, 150 + i * 120);
+      setTimeout(() => { el.style.width = w + '%'; }, 120 + i * 70);
     });
+
+    const search = document.getElementById('candidate-search');
+    const status = document.getElementById('status-filter');
+    const showAll = document.getElementById('show-all');
+    const count = document.getElementById('visible-count');
+    const rows = Array.from(document.querySelectorAll('#candidate-table tbody tr'));
+    let revealAll = false;
+
+    const applyFilters = () => {
+      const q = (search?.value || '').trim().toLowerCase();
+      const s = status?.value || 'all';
+      let visible = 0;
+      rows.forEach((row) => {
+        const matchesQuery = !q || (row.dataset.name || '').includes(q);
+        const matchesStatus = s === 'all' || row.dataset.status === s;
+        const pastInitial = row.dataset.hiddenInitial === 'true';
+        const shouldShow = matchesQuery && matchesStatus && (revealAll || q || s !== 'all' || !pastInitial);
+        row.hidden = !shouldShow;
+        if (shouldShow) visible += 1;
+      });
+      if (count) count.textContent = String(visible);
+    };
+
+    search?.addEventListener('input', applyFilters);
+    status?.addEventListener('change', applyFilters);
+    showAll?.addEventListener('click', () => { revealAll = true; applyFilters(); showAll.hidden = true; });
+    applyFilters();
   });
 </script>
 </body>
