@@ -53,13 +53,40 @@ class WebWorkerAssetsTest(unittest.TestCase):
     def test_start_validates_pose_engine(self):
         # Phase 5: pose engine is validated and passed through to run_job.
         self.assertIn('payload.get("pose_engine"', self.source)
-        self.assertIn('"gnina", "diffdock", "hybrid"', self.source)
+        self.assertIn('"gnina", "diffdock", "boltz2", "hybrid"', self.source)
         self.assertIn('"pose_engine": pose_engine', self.source)
 
     def test_scientific_report_wired(self):
         # Phase 7/7.5: rich report layered additively, image src rewritten.
         self.assertIn("build_scientific_report", self.source)
         self.assertIn("report-asset", self.source)
+
+    def test_git_auto_sync(self):
+        # Auto-updating deploy: code is pulled from GitHub at run time instead of
+        # being frozen into the image, so no redeploy is needed after a push.
+        self.assertIn("def _git_sync", self.source)
+        self.assertIn("REMEDIA_GIT_BRANCH", self.source)
+        self.assertIn('"reset", "--hard"', self.source)
+        # The GPU worker must sync before loading the pipeline.
+        self.assertIn("_git_sync(force=True)", self.source)
+        # The page load triggers a throttled sync so a refresh picks up new code.
+        self.assertIn("def home", self.source)
+
+    def test_speed_selector_present(self):
+        # Speed control exposed in the UI and validated server-side.
+        self.assertIn('name="speed"', self.source)
+        for value in ("hizli", "dengeli"):
+            self.assertIn(f'value="{value}"', self.source)
+
+    def test_start_validates_speed(self):
+        self.assertIn('payload.get("speed"', self.source)
+        self.assertIn('"hizli", "dengeli"', self.source)
+
+    def test_run_job_accepts_speed(self):
+        self.assertIn("speed: str", self.source)
+        # Speed maps onto the GNINA staging mode.
+        self.assertIn('"sadece_fast"', self.source)
+        self.assertIn('"iki_asamali"', self.source)
 
 
 if __name__ == "__main__":

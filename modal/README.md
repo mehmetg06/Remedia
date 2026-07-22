@@ -1,5 +1,50 @@
 # Remedia on Modal
 
+## Önerilen yol: bir kez deploy et, sabit URL kendini günceller
+
+Bu yol notebook'a tekrar tekrar deploy etmeyi bitirir. **Bir kez** çalıştırırsın,
+sabit bir web adresi alırsın; sonra GitHub'a her push otomatik olarak canlıya
+yansır — bir daha terminale dokunmana gerek yoktur.
+
+```bash
+python -m pip install modal
+python -m modal setup
+modal deploy modal/remedia_web_v2.py
+```
+
+Komut kalıcı bir URL yazdırır (örn. `https://<workspace>--remedia-web-web.modal.run`).
+Formda UniProt ID, molekül sayısı, üretici, poz motoru ve **Hız** seçilir.
+
+### Neden tekrar deploy gerekmiyor
+
+Uygulama kodu artık imaja donmuyor; her iş çalıştığında ve her sayfa
+yenilemesinde GitHub'daki takip edilen daldan (`main`) çekiliyor:
+
+- `run_job` başlarken `git fetch` + `reset --hard` ile en güncel koda geçer.
+- Ana sayfa yenilendiğinde (kısıtlamalı) aynı senkron tetiklenir.
+- Sonuçlar, cache ve iş dosyaları repo dizininin **dışında** durduğu için
+  güncelleme hiçbir çıktı verisini silmez.
+- GitHub'a erişilemezse imaja gömülü kopyaya düşer, uygulama yine açılır.
+
+Başka bir dala sabitlemek istersen ortam değişkeni ver:
+
+```bash
+REMEDIA_GIT_BRANCH=stabil modal deploy modal/remedia_web_v2.py
+```
+
+Kod güncellemek için tek yapman gereken GitHub'daki dala push etmek; ardından
+URL'i yenile.
+
+### Hız seçeneği
+
+- **Hızlı** (varsayılan): tek GNINA taraması (`sadece_fast`). İkinci, yavaş
+  ayrıntılı süreci atlar; günlük tarama için belirgin biçimde daha hızlıdır.
+- **Dengeli**: iki aşamalı `hızlı → ayrıntılı` doğrulama. Daha yavaş ama nihai
+  aday setinde daha sağlam skor verir.
+
+DiffDock/Boltz-2 poz motorlarını seçersen GNINA yalnızca destekleyici rolde
+kalır; Hız seçeneği o durumda sadece GNINA kısmını etkiler.
+
 ## En kolay yol: form kullanan Modal Notebook
 
 Bu yol bilgisayar terminali ve kod satırı düzenleme gerektirmez.
