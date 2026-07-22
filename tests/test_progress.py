@@ -96,6 +96,49 @@ class TestReporter(unittest.TestCase):
         r.stage("pocket")  # must not raise
 
 
+class TestLiveEvents(unittest.TestCase):
+    def test_event_carries_type_and_payload(self):
+        seen = []
+        r = progress.ProgressReporter(emit_stdout=False, sink=seen.append)
+        r.stage("dock_fast", total=20)
+        r.update(10)
+        emitted = r.event(
+            "candidate_scored", candidate="mol_003", predicted_pic50=7.2,
+            accepted=True,
+        )
+        self.assertEqual(emitted["event"], "candidate_scored")
+        self.assertEqual(emitted["candidate"], "mol_003")
+        self.assertEqual(emitted["predicted_pic50"], 7.2)
+        self.assertTrue(emitted["accepted"])
+        self.assertEqual(seen[-1]["event"], "candidate_scored")
+
+    def test_event_does_not_change_counters(self):
+        r = progress.ProgressReporter(emit_stdout=False)
+        r.stage("dock_fast", total=20)
+        r.update(10)
+        before = r.snapshot()
+        r.event("leader_changed", candidate="mol_001")
+        after = r.snapshot()
+        self.assertEqual(after["items_done"], before["items_done"])
+        self.assertEqual(after["percent"], before["percent"])
+
+    def test_event_persisted_and_sentinel_roundtrips(self):
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            r = progress.ProgressReporter(tmp, emit_stdout=True, stream=buf)
+            r.stage("generate", total=5)
+            r.event("candidate_generated", candidate="mol_001", smiles="CCO")
+            jsonl = Path(tmp) / "progress.jsonl"
+            payloads = [json.loads(ln) for ln in jsonl.read_text().splitlines()]
+            self.assertTrue(any(p.get("event") == "candidate_generated" for p in payloads))
+            sentinel_lines = [
+                ln for ln in buf.getvalue().splitlines() if progress.SENTINEL in ln
+            ]
+            parsed = progress.parse_sentinel(sentinel_lines[-1])
+            self.assertEqual(parsed["event"], "candidate_generated")
+            self.assertEqual(parsed["candidate"], "mol_001")
+
+
 class TestStdoutSentinel(unittest.TestCase):
     def test_echo_emits_human_line_and_sentinel(self):
         buf = io.StringIO()

@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -254,16 +255,28 @@ def _artifact_path(value: str | None) -> Path | None:
 PROGRESS_SENTINEL = "[[REMEDIA_PROGRESS]]"
 
 
-class _ProgressStream(io.TextIOBase):
-    """Capture pipeline logs without stalling GNINA on frequent Volume commits.
+def _events_file(job_id: str) -> Path:
+    return JOBS_PATH / f"{job_id}.events.jsonl"
 
-    Phase 2: when the pipeline emits structured progress events (lines prefixed
-    with :data:`PROGRESS_SENTINEL`), those precise stage/task/item counts drive
-    the UI.  For any line without a sentinel the legacy heuristic scraping below
-    remains as a fallback, so older pipeline code keeps reporting progress.
+
+class _ProgressStream(io.TextIOBase):
+    """Capture pipeline logs and fan them out to two surfaces (Faz 1):
+
+    * a collapsed per-job ``{job_id}.json`` snapshot that drives the top-line
+      progress bar, and
+    * an append-only per-job ``{job_id}.events.jsonl`` that drives the live
+      experiment console (molecule feed, leaderboard, telemetry, raw log).
+
+    Structured progress events (lines prefixed with :data:`PROGRESS_SENTINEL`)
+    drive both; any line without a sentinel falls back to the legacy heuristic
+    scraping so older pipeline code keeps reporting.  Volume commits are throttled
+    — the snapshot and the event log are committed together at most once per
+    :data:`COMMIT_INTERVAL_SECONDS` — so a burst of per-candidate events never
+    stalls GNINA on frequent commits.  A background :meth:`heartbeat_loop` keeps
+    the console alive while a blocking GNINA batch emits no log lines.
     """
 
-    COMMIT_INTERVAL_SECONDS = 3.0
+    COMMIT_INTERVAL_SECONDS = 1.0
 
     def __init__(self, job_id: str):
         self.job_id = job_id
@@ -274,32 +287,83 @@ class _ProgressStream(io.TextIOBase):
         self.last_commit_at = 0.0
         self.gnina_phase = ""
         self.gnina_phase_started_at = time.monotonic()
+        # Live console state.
+        self.events_path = _events_file(job_id)
+        self.event_seq = 0
+        self.started_at = time.monotonic()
+        self.last_event_at = self.started_at
+        self.last_stage = "receptor"
+        self.last_stage_label = "Reseptör hazırlanıyor"
+        self.last_message = "Reseptör hazırlanıyor"
+        self._lock = threading.Lock()
+        try:  # start every run with a clean event log
+            self.events_path.write_text("", encoding="utf-8")
+        except Exception:
+            pass
 
-    def _advance(
-        self,
-        percent: int,
-        message: str,
-        step: int,
-        *,
-        force: bool = False,
-    ) -> None:
-        target = max(self.percent, min(percent, 96))
+    # -- live event log ----------------------------------------------------
+    def _append_event(self, event: dict, *, real: bool = True) -> None:
+        with self._lock:
+            self.event_seq += 1
+            record = dict(event)
+            record["seq"] = self.event_seq
+            record["server_ts"] = time.time()
+            try:
+                with self.events_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            if real:
+                self.last_event_at = time.monotonic()
+
+    def _maybe_commit(self, force: bool = False) -> None:
         now = time.monotonic()
-        significant = step != self.last_committed_step or target >= self.last_committed_percent + 3
-        due = now - self.last_commit_at >= self.COMMIT_INTERVAL_SECONDS
-        self.percent = target
-        if not (force or significant or due):
-            return
-        _write_job(
-            self.job_id,
-            state="running",
-            step=step,
-            progress_percent=self.percent,
-            message=message,
+        with self._lock:
+            if not force and now - self.last_commit_at < self.COMMIT_INTERVAL_SECONDS:
+                return
+            self.last_commit_at = now
+        try:
+            volume.commit()
+        except Exception:
+            pass
+
+    def heartbeat(self) -> None:
+        now = time.monotonic()
+        self._append_event(
+            {
+                "schema": "remedia.progress/1",
+                "event": "heartbeat",
+                "stage": self.last_stage,
+                "stage_label": self.last_stage_label,
+                "message": self.last_message,
+                "percent": self.percent,
+                "elapsed_seconds": round(now - self.started_at, 1),
+                "since_last_event": round(now - self.last_event_at, 1),
+                "processed": self.event_seq,
+                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+            },
+            real=False,
         )
-        self.last_commit_at = now
+        self._maybe_commit()
+
+    def heartbeat_loop(self, stop_event: "threading.Event") -> None:
+        while not stop_event.wait(1.0):
+            try:
+                self.heartbeat()
+            except Exception:
+                pass
+
+    # -- snapshot (top-line progress bar) ----------------------------------
+    def _advance(self, percent: int, message: str, step: int, *, force: bool = False) -> None:
+        self.percent = max(self.percent, min(percent, 96))
+        self.last_message = message
+        _write_job_local(
+            self.job_id, state="running", step=step,
+            progress_percent=self.percent, message=message,
+        )
         self.last_committed_percent = self.percent
         self.last_committed_step = step
+        self._maybe_commit(force=force)
 
     def _start_gnina_phase(self, phase: str, percent: int, message: str) -> None:
         self.gnina_phase = phase
@@ -315,27 +379,38 @@ class _ProgressStream(io.TextIOBase):
         return max(self.percent, 54)
 
     def _structured(self, event: dict) -> None:
-        """Commit a structured progress event straight to the job file."""
+        """Update the collapsed job snapshot from a structured progress event.
+
+        Discrete live events (``candidate_scored``, ``leader_changed``, …) still
+        refresh the ``stage``/``message`` shown on the top-line bar but never
+        rewind item counts; stage/update events carry the authoritative percent.
+        """
         percent = event.get("percent")
         try:
             percent = int(round(float(percent)))
         except (TypeError, ValueError):
             percent = self.percent
-        # Structured events carry the authoritative percent; still never regress.
         self.percent = max(self.percent, min(percent, 99))
         step = int(event.get("step", self.last_committed_step) or 1)
         label = event.get("stage_label") or event.get("task") or ""
+        self.last_stage = event.get("stage") or self.last_stage
+        self.last_stage_label = label or self.last_stage_label
         done, total = event.get("items_done"), event.get("items_total")
-        if total:
+        if event.get("event"):
+            # A discrete live event: keep the last stage message, don't overwrite
+            # the bar with per-candidate chatter.
+            message = self.last_message
+        elif total:
             message = f"{label} ({done or 0}/{total})"
         else:
             message = event.get("message") or label
-        _write_job(
+        self.last_message = message or self.last_message
+        _write_job_local(
             self.job_id,
             state="running",
             step=step,
             progress_percent=self.percent,
-            message=message,
+            message=self.last_message,
             stage=event.get("stage"),
             stage_label=label,
             task=event.get("task"),
@@ -343,8 +418,6 @@ class _ProgressStream(io.TextIOBase):
             items_total=total,
             eta_seconds=event.get("eta_seconds"),
         )
-        self.last_commit_at = time.monotonic()
-        self.last_committed_percent = self.percent
         self.last_committed_step = step
 
     def write(self, text: str) -> int:
@@ -352,7 +425,8 @@ class _ProgressStream(io.TextIOBase):
         if len(self.buffer) > 50000:
             self.buffer = self.buffer[-50000:]
 
-        # Structured events (Phase 2) take priority over heuristic scraping.
+        # Structured events (Phase 2) take priority over heuristic scraping: every
+        # one is appended to the live event log and folded into the snapshot.
         if PROGRESS_SENTINEL in text:
             handled = False
             for line in text.splitlines():
@@ -365,9 +439,11 @@ class _ProgressStream(io.TextIOBase):
                 except (ValueError, TypeError):
                     continue
                 if isinstance(event, dict) and event.get("schema") == "remedia.progress/1":
+                    self._append_event(event)
                     self._structured(event)
                     handled = True
             if handled:
+                self._maybe_commit()
                 return len(text)
 
         low = text.lower()
@@ -471,6 +547,13 @@ def run_job(
     )
 
     stream = _ProgressStream(job_id)
+    # Heartbeat thread: proves liveness on the live console even while a blocking
+    # GNINA subprocess batch produces no log lines for many seconds.
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=stream.heartbeat_loop, args=(heartbeat_stop,), daemon=True
+    )
+    heartbeat_thread.start()
     original_cwd = Path.cwd()
     try:
         os.chdir(VOLUME_PATH)
@@ -607,6 +690,9 @@ def run_job(
             technical_excerpt=technical[-3500:],
         )
     finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=3)
+        stream._maybe_commit(force=True)
         os.chdir(original_cwd)
 
 
@@ -614,11 +700,37 @@ HTML = r'''<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Remedia</title><style>
 :root{font-family:Inter,system-ui,sans-serif;color:#171717;background:#f5f5f3}*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}.card{width:min(590px,100%);background:#fff;border:1px solid #deded8;border-radius:24px;padding:28px;box-shadow:0 18px 55px #00000012}
-h1{margin:0 0 6px;font-size:34px}.sub{margin:0 0 26px;color:#666}.field{margin:18px 0}label{display:block;font-weight:700;margin-bottom:8px}input{width:100%;padding:15px;border:1px solid #c9c9c3;border-radius:13px;font-size:18px}input[type=radio]{width:auto;padding:0}
+body{margin:0;min-height:100vh;padding:24px;display:flex;justify-content:center}
+main{width:min(1120px,100%)}
+.card{background:#fff;border:1px solid #deded8;border-radius:24px;padding:28px;box-shadow:0 18px 55px #00000012}
+h1{margin:0 0 6px;font-size:34px}.sub{margin:0 0 22px;color:#666}.field{margin:18px 0}label{display:block;font-weight:700;margin-bottom:8px}input{width:100%;padding:15px;border:1px solid #c9c9c3;border-radius:13px;font-size:18px}input[type=radio]{width:auto;padding:0}
 .choices{display:flex;gap:8px;flex-wrap:wrap}.choice{flex:1;min-width:120px;display:flex;align-items:center;gap:8px;padding:12px 14px;border:1px solid #c9c9c3;border-radius:13px;font-weight:600;cursor:pointer}.choice:has(input:checked){border-color:#171717;background:#f0f0ec}
-button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.btn.secondary{background:#ecece8;color:#171717;margin-bottom:10px}.muted{color:#74746e;font-size:14px;margin-top:10px}.progress{display:none;margin-top:24px}.progress-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:10px}.progress-title{font-weight:800}.percent{font-variant-numeric:tabular-nums;font-weight:800;color:#555}.bar{height:14px;background:#e9e9e4;border-radius:99px;overflow:hidden;position:relative}.fill{height:100%;width:0;background:linear-gradient(90deg,#111,#4d4d4d);transition:width .65s cubic-bezier(.2,.8,.2,1);position:relative}.fill:after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 25%,#ffffff55 45%,transparent 65%);animation:shine 1.6s linear infinite}@keyframes shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}.stages{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:9px}.stage{height:4px;border-radius:99px;background:#e9e9e4}.stage.active{background:#555}.step{font-weight:800;margin:14px 0 6px}.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.done{display:none;margin-top:18px}.done-note{padding:13px;background:#f6f6f3;border-radius:12px;margin-bottom:12px;color:#555}.retry{margin-top:10px;background:#555}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #bbb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
-</style></head><body><main class="card"><h1>Remedia</h1><p class="sub">REINVENT4 → GNINA → ADMET</p>
+button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:14px;padding:16px;font-size:17px;font-weight:800;text-decoration:none;cursor:pointer;background:#171717;color:#fff}.btn.secondary{background:#ecece8;color:#171717;margin-bottom:10px}.muted{color:#74746e;font-size:14px;margin-top:10px}
+.console{display:none;margin-top:22px}
+.now{background:#0f0f0f;color:#f3f3f0;border-radius:18px;padding:18px 20px}
+.now-head{display:flex;align-items:center;gap:10px;font-weight:800;font-size:16px}
+.hb{width:12px;height:12px;border-radius:50%;background:#3ddc84;box-shadow:0 0 0 0 #3ddc8455;animation:pulse 1s infinite}
+.hb.stale{background:#e0a53d;animation:none}.hb.dead{background:#c94b4b;animation:none}
+@keyframes pulse{0%{box-shadow:0 0 0 0 #3ddc8477}70%{box-shadow:0 0 0 9px #3ddc8400}100%{box-shadow:0 0 0 0 #3ddc8400}}
+.now-task{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.now-pct{font-variant-numeric:tabular-nums;font-weight:800}
+.bar{height:12px;background:#2a2a2a;border-radius:99px;overflow:hidden;margin-top:12px;position:relative}.fill{height:100%;width:0;background:linear-gradient(90deg,#3ddc84,#7fe8ac);transition:width .6s cubic-bezier(.2,.8,.2,1)}
+.tele{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}.chip{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:7px 11px;font-size:12px;color:#cfcfca}.chip b{color:#fff;font-variant-numeric:tabular-nums}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}@media(max-width:760px){.cols{grid-template-columns:1fr}}
+.panel{border:1px solid #e2e2dc;border-radius:16px;padding:14px;background:#fbfbf9;min-height:120px}
+.panel h3{margin:0 0 10px;font-size:15px}
+table.lead{width:100%;border-collapse:collapse;font-size:13px}table.lead td,table.lead th{padding:6px 8px;border-bottom:1px solid #eee;text-align:left}table.lead th{color:#888;font-weight:700;font-size:11px;text-transform:uppercase}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}.high{background:#2e9e5b}.mid{background:#c79320}.low{background:#b5b5ad}.na{background:#c94b4b}
+.sc{font-variant-numeric:tabular-nums;font-weight:700}
+.lead tr.flash{animation:flash 1.1s}@keyframes flash{from{background:#fff6cf}to{background:transparent}}
+.feed{max-height:340px;overflow:auto;display:flex;flex-direction:column;gap:6px}
+.fi{border:1px solid #eee;border-left:3px solid #bbb;border-radius:8px;padding:7px 10px;font-size:12px;background:#fff}
+.fi.ok{border-left-color:#2e9e5b}.fi.rej{border-left-color:#c94b4b}.fi.gen{border-left-color:#8a8a82}.fi.lead{border-left-color:#c79320;background:#fffdf3}
+.fi .mol{font-weight:800}.fi .rs{font-variant-numeric:tabular-nums;color:#333}.fi .sm{font-family:ui-monospace,monospace;font-size:11px;color:#777;overflow-wrap:anywhere}
+.rawlog{margin-top:14px}.rawlog summary{cursor:pointer;color:#666;font-size:13px;font-weight:700}.rawlog pre{max-height:220px;overflow:auto;background:#0f0f0f;color:#d6d6cf;padding:12px;border-radius:12px;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
+.warnbox{background:#fff6df;border:1px solid #eed69d;border-radius:12px;padding:11px;margin-top:12px;font-size:13px}
+.error{color:#a32020;background:#fff0f0;padding:14px;border-radius:12px;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.done{display:none;margin-top:16px}.done-note{padding:13px;background:#f6f6f3;border-radius:12px;margin-bottom:12px;color:#555}.retry{margin-top:10px;background:#555}
+</style></head><body><main><div class="card"><h1>Remedia</h1><p class="sub">Hedefe göre molekül tasarımı · canlı deney konsolu</p>
 <form id="form"><div class="field"><label for="u">UniProt ID</label><input id="u" value="P00918" autocomplete="off" required pattern="[A-Za-z0-9-]{4,16}"></div>
 <div class="field"><label for="n">Molekül sayısı</label><input id="n" type="number" value="20" min="5" max="100" step="5" required></div>
 <div class="field"><label>Üretici (Generator)</label><div class="choices">
@@ -632,21 +744,69 @@ button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:1
 <label class="choice"><input type="radio" name="pose" value="boltz2"> Boltz-2</label>
 <label class="choice"><input type="radio" name="pose" value="hybrid"> Hybrid Validation</label>
 </div></div>
-<div class="field"><label>Hız</label><div class="choices">
-<label class="choice"><input type="radio" name="speed" value="hizli" checked> Hızlı</label>
-<label class="choice"><input type="radio" name="speed" value="dengeli"> Dengeli</label>
-</div><p class="muted">Hızlı: tek GNINA taraması. Dengeli: iki aşamalı (hızlı → ayrıntılı doğrulama), daha yavaş ama daha sağlam skor.</p></div>
-<button id="start" type="submit">Remedia’yı Başlat</button><p class="muted">Sonuç paketi açıklamalı HTML raporu, tekleştirilmiş aday tablosu, veri sözlüğü, çalışma ayarları ve teknik log içerecektir.</p></form>
-<section id="progress" class="progress"><div class="progress-head"><div class="progress-title">İşlem ilerliyor</div><div id="percent" class="percent">0%</div></div><div class="bar"><div id="fill" class="fill"></div></div><div class="stages"><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div></div><div id="step" class="step"><span class="spinner"></span> Hazırlanıyor</div><div id="message" class="muted"></div><div id="error"></div></section>
+<div class="field"><label>Hız (GNINA docking modu)</label><div class="choices">
+<label class="choice"><input type="radio" name="speed" value="hizli" checked> Sadece hızlı (tek geçiş)</label>
+<label class="choice"><input type="radio" name="speed" value="dengeli"> İki aşamalı (hızlı → doğrulama)</label>
+</div><p class="muted">Sadece hızlı: tek bir hızlı GNINA taraması. İki aşamalı: önce hızlı tarama, sonra en iyi adaylar için ayrıntılı doğrulama — daha yavaş, daha sağlam.</p></div>
+<button id="start" type="submit">Remedia’yı Başlat</button>
+<p class="muted">Docking sonucu üretilemeyen adaylar cezalandırılır ve ayrı gösterilir. Sıralama skoru geçici bir <b>heuristik</b>tir (eğitilmiş model değildir).</p></form>
+
+<section id="console" class="console">
+<div class="now"><div class="now-head"><span id="hb" class="hb"></span><span id="nowtask" class="now-task">Hazırlanıyor…</span><span id="nowpct" class="now-pct">0%</span></div>
+<div class="bar"><div id="fill" class="fill"></div></div>
+<div class="tele" id="tele"></div></div>
+
+<div class="cols">
+<div class="panel"><h3>Canlı lider tablosu</h3><table class="lead"><thead><tr><th>#</th><th>Molekül</th><th>Skor</th><th>Durum</th></tr></thead><tbody id="leadbody"><tr><td colspan="4" class="muted" style="margin:0">Aday bekleniyor…</td></tr></tbody></table></div>
+<div class="panel"><h3>Canlı molekül akışı</h3><div class="feed" id="feed"><div class="muted" style="margin:0">Olaylar burada canlı akacak…</div></div></div>
+</div>
+
+<div class="warnbox"><b>Not:</b> Skorlar hesaplamalı tahmindir; deneysel aktivite, toksisite veya klinik uygunluk kanıtı değildir. Docking/pose araçları bağımsız bir fiziksel kontroldür, ana sıralama motoru değildir.</div>
+<details class="rawlog"><summary>Ham teknik log</summary><pre id="rawlog"></pre></details>
+<div id="error"></div>
+</section>
+
 <section id="done" class="done"><div id="doneNote" class="done-note">Açıklamalı rapor ve ham veriler hazır.</div><a id="report" class="btn secondary" target="_blank">Raporu tarayıcıda aç</a><a id="download" class="btn">Tam sonuç paketini indir</a><button class="retry" onclick="location.reload()">Yeni işlem</button></section>
+</div></main>
 <script>
-const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done'),pct=document.querySelector('#percent'),stages=[...document.querySelectorAll('.stage')];
-form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value),generator:document.querySelector('input[name=gen]:checked').value,pose_engine:document.querySelector('input[name=pose]:checked').value,speed:document.querySelector('input[name=speed]:checked').value})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
-function paint(x){const p=Math.max(0,Math.min(100,Number(x.progress_percent??((x.step||1)/5*100))));fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';stages.forEach((el,i)=>el.classList.toggle('active',i<(x.step||1)));}
-function detail(x){let m=x.message||'';if(x.items_total){m=(x.stage_label||x.task||m)+' ('+(x.items_done||0)+'/'+x.items_total+')';}if(x.eta_seconds){m+=' · ~'+Math.round(x.eta_seconds)+'s kaldı';}return m;}
-async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=detail(x);if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;document.querySelector('#report').href='/report/'+id;document.querySelector('#doneNote').textContent=`${x.candidate_count??0} aday bulundu; ${x.scored_candidate_count??0} aday için docking skoru okundu.`;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}const title=x.stage_label||((x.step||1)+'/5');step.innerHTML='<span class="spinner"></span> '+title;setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
-function showError(t){step.textContent='İşlem durdu';err.className='error';err.textContent=t;const b=document.createElement('button');b.className='retry';b.textContent='Tekrar dene';b.onclick=()=>location.reload();err.appendChild(b);}
-</script></main></body></html>'''
+const $=s=>document.querySelector(s);
+const con=$('#console'),fill=$('#fill'),nowtask=$('#nowtask'),nowpct=$('#nowpct'),hb=$('#hb'),tele=$('#tele'),leadbody=$('#leadbody'),feedEl=$('#feed'),rawlog=$('#rawlog'),err=$('#error'),done=$('#done');
+const S={since:0,leaders:{},feed:[],log:[],generated:0,scored:0,leader:null,round:null,elapsed:0,sinceLast:0,pct:0,engine:''};
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function band(v){if(v==null||v==='')return'na';v=Number(v);if(v>=0.75)return'high';if(v>=0.5)return'mid';return'low';}
+function fmt(v,d){if(v==null||v==='')return'—';const n=Number(v);return isNaN(n)?String(v):n.toFixed(d==null?2:d);}
+form.addEventListener('submit',async e=>{e.preventDefault();$('#start').disabled=true;$('#form').style.display='none';con.style.display='block';
+ const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:$('#u').value,molecule_count:Number($('#n').value),generator:document.querySelector('input[name=gen]:checked').value,pose_engine:document.querySelector('input[name=pose]:checked').value,speed:document.querySelector('input[name=speed]:checked').value})});
+ const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}S.engine=document.querySelector('input[name=gen]:checked').value+' · '+document.querySelector('input[name=pose]:checked').value;poll(x.job_id);});
+function setHb(){const s=S.sinceLast;hb.className='hb'+(s>15?' dead':s>6?' stale':'');}
+function renderTele(job){const cps=S.elapsed>0?(S.scored/S.elapsed).toFixed(2):'0';const eta=job&&job.eta_seconds?('~'+Math.round(job.eta_seconds)+'s'):'—';
+ tele.innerHTML=[['Süre',Math.round(S.elapsed)+'s'],['Üretilen',S.generated],['Skorlanan',S.scored],['Aday/sn',cps],['Kalan (ETA)',eta],['Son olay',Math.round(S.sinceLast)+'s önce'],['Motor',S.engine||'—']].map(p=>'<span class="chip">'+p[0]+' <b>'+esc(p[1])+'</b></span>').join('');}
+function renderLeaders(){const rows=Object.values(S.leaders).filter(c=>c.score!=null).sort((a,b)=>b.score-a.score).slice(0,10);
+ if(!rows.length){return;}leadbody.innerHTML=rows.map((c,i)=>'<tr'+(c.name===S.leader&&i===0?' class="flash"':'')+'><td>'+(i+1)+'</td><td class="mol">'+esc(c.name)+'</td><td class="sc"><span class="dot '+band(c.score)+'"></span>'+fmt(c.score)+'</td><td>'+esc(c.status||'—')+'</td></tr>').join('');}
+function pushFeed(html){S.feed.unshift(html);if(S.feed.length>40)S.feed.pop();feedEl.innerHTML=S.feed.join('');}
+function handle(e){const t=e.event;
+ if(t==='heartbeat'){S.elapsed=e.elapsed_seconds||S.elapsed;S.sinceLast=e.since_last_event||0;if(e.percent!=null)S.pct=Math.max(S.pct,e.percent);setHb();return;}
+ S.sinceLast=0;
+ if(e.elapsed_seconds!=null)S.elapsed=Math.max(S.elapsed,e.elapsed_seconds);
+ if(t==='candidate_generated'){S.generated++;pushFeed('<div class="fi gen"><span class="mol">'+esc(e.candidate)+'</span> üretildi <span class="sm">'+esc(e.smiles)+'</span></div>');}
+ else if(t==='candidate_scored'){S.scored++;S.leaders[e.candidate]={name:e.candidate,score:e.remedia_score,status:e.docking_status,accepted:e.accepted};
+  pushFeed('<div class="fi '+(e.accepted?'ok':'rej')+'"><span class="mol">'+esc(e.candidate)+'</span> <span class="rs">skor '+fmt(e.remedia_score)+'</span> · '+esc(e.reason||'')+'</div>');renderLeaders();}
+ else if(t==='leader_changed'){S.leader=e.candidate;pushFeed('<div class="fi lead">🏆 Yeni lider: <span class="mol">'+esc(e.candidate)+'</span> ('+fmt(e.remedia_score)+')</div>');renderLeaders();}
+ else if(t==='round_started'){S.round=e.round;pushFeed('<div class="fi">▶ Tur '+esc(e.round)+' başladı</div>');}
+ else if(t==='round_completed'){pushFeed('<div class="fi">■ Tur '+esc(e.round)+' tamamlandı</div>');}
+ else if(t==='warning'||e.level==='warning'){pushFeed('<div class="fi rej">⚠ '+esc(e.message||'uyarı')+'</div>');}
+ else{if(e.stage_label||e.message){nowtask.textContent=(e.items_total?(e.stage_label||e.message)+' ('+(e.items_done||0)+'/'+e.items_total+')':(e.message||e.stage_label));}if(e.percent!=null)S.pct=Math.max(S.pct,e.percent);}
+ if(e.message){S.log.push(e.message);if(S.log.length>400)S.log.shift();rawlog.textContent=S.log.slice(-200).join('\n');}
+}
+function applyJob(job){if(!job)return;if(job.progress_percent!=null)S.pct=Math.max(S.pct,job.progress_percent);const p=Math.max(0,Math.min(100,S.pct));fill.style.width=p+'%';nowpct.textContent=Math.round(p)+'%';renderTele(job);}
+async function poll(id){try{const r=await fetch('/events/'+id+'?since='+S.since,{cache:'no-store'}),x=await r.json();
+ S.since=x.last_seq||S.since;(x.events||[]).forEach(handle);applyJob(x.job||{});
+ const st=(x.job||{}).state;
+ if(st==='done'){nowtask.textContent='Tamamlandı';hb.className='hb';done.style.display='block';$('#download').href='/download/'+id;$('#report').href='/report/'+id;$('#doneNote').textContent=((x.job.candidate_count??0)+' aday; '+(x.job.scored_candidate_count??0)+' aday için docking skoru. Skor geçici bir heuristiktir.');return;}
+ if(st==='error'){showError(((x.job||{}).message||'İşlem başarısız')+((x.job||{}).technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.job.technical_excerpt:''));return;}
+ setTimeout(()=>poll(id),900);}catch(e){setTimeout(()=>poll(id),2500);}}
+function showError(t){nowtask.textContent='İşlem durdu';hb.className='hb dead';err.className='error';err.textContent=t;const b=document.createElement('button');b.className='retry';b.textContent='Tekrar dene';b.onclick=()=>location.reload();err.appendChild(b);}
+</script></body></html>'''
 
 
 @app.function(
@@ -725,6 +885,43 @@ def web():
     @api.get("/status/{job_id}")
     async def status(job_id: str):
         return await _read_job(job_id)
+
+    @api.get("/events/{job_id}")
+    async def events(job_id: str, since: int = 0):
+        """Live event stream for the experiment console.
+
+        Returns every structured event with ``seq > since`` from the per-job
+        ``events.jsonl`` plus the latest collapsed job snapshot, so one poll (~1s)
+        drives the molecule feed, leaderboard, telemetry and terminal state.
+        """
+        await volume.reload.aio()
+        job: dict = {}
+        job_path = _job_file(job_id)
+        if job_path.exists():
+            try:
+                job = json.loads(job_path.read_text())
+            except Exception:
+                job = {}
+        new_events: list[dict] = []
+        last_seq = since
+        events_path = _events_file(job_id)
+        if events_path.exists():
+            try:
+                for line in events_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    seq = int(record.get("seq", 0) or 0)
+                    if seq > since:
+                        new_events.append(record)
+                    last_seq = max(last_seq, seq)
+            except Exception:
+                pass
+        return {"events": new_events, "last_seq": last_seq, "job": job}
 
     @api.get("/download/{job_id}")
     async def download(job_id: str):

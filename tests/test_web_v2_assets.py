@@ -88,6 +88,40 @@ class WebWorkerAssetsTest(unittest.TestCase):
         self.assertIn('"sadece_fast"', self.source)
         self.assertIn('"iki_asamali"', self.source)
 
+    def test_live_event_stream_wired(self):
+        # Faz 1: per-job events.jsonl + /events polling route.
+        self.assertIn("def _events_file", self.source)
+        self.assertIn(".events.jsonl", self.source)
+        self.assertIn("_append_event", self.source)
+        self.assertIn('@api.get("/events/{job_id}")', self.source)
+        self.assertIn("since: int", self.source)
+        self.assertIn("last_seq", self.source)
+
+    def test_heartbeat_thread_wired(self):
+        # Faz 1: a background heartbeat proves liveness during blocking GNINA.
+        self.assertIn("def heartbeat", self.source)
+        self.assertIn("heartbeat_loop", self.source)
+        self.assertIn("threading.Thread", self.source)
+        self.assertIn('"event": "heartbeat"', self.source)
+
+    def test_live_console_ui_present(self):
+        # Faz 1 §6.4 panels + event-stream polling in the frontend.
+        self.assertIn("Canlı lider tablosu", self.source)
+        self.assertIn("Canlı molekül akışı", self.source)
+        self.assertIn("/events/", self.source)      # UI polls the stream
+        self.assertIn("candidate_scored", self.source)
+        self.assertIn("leader_changed", self.source)
+        self.assertIn("Ham teknik log", self.source)
+
+    def test_speed_labels_are_explicit(self):
+        # A3: fast-only vs two-stage named explicitly (values unchanged).
+        self.assertIn("Sadece hızlı", self.source)
+        self.assertIn("İki aşamalı", self.source)
+
+    def test_score_labelled_as_heuristic(self):
+        # A2: the UI frames the score as a temporary heuristic, not a certainty.
+        self.assertIn("heuristik", self.source.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

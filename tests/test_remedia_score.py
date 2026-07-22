@@ -109,6 +109,72 @@ class TestFallback(unittest.TestCase):
         self.assertIn("remedia_score", ranked[0])
 
 
+class TestDockingFailurePenalty(unittest.TestCase):
+    def test_failed_dock_scores_below_equivalent_scored(self):
+        # Same molecule twice: one docked, one whose docking produced no score.
+        # The failed one must rank strictly below despite identical ADMET/props.
+        cands = [
+            candidate("m_ok", aff=-8.0, passed=True, viol="-", mw=320, logp=2.0,
+                      tpsa=70, hbd=1, hba=4, smiles="CCO"),
+            candidate("m_fail", aff=None, passed=True, viol="-", mw=320, logp=2.0,
+                      tpsa=70, hbd=1, hba=4, smiles="CCO"),
+        ]
+        scored = {c["ligand"]: c for c in rs.compute_scores(cands)}
+        self.assertEqual(scored["m_ok"]["docking_status"], "scored")
+        self.assertEqual(scored["m_fail"]["docking_status"], "docking_failed")
+        self.assertLess(scored["m_fail"]["remedia_score"], scored["m_ok"]["remedia_score"])
+        # The failed candidate is still scored (not None) but capped by losing the
+        # pose weight from the numerator.
+        self.assertIsNotNone(scored["m_fail"]["remedia_score"])
+
+    def test_explicit_docking_success_false_is_penalised(self):
+        ok = candidate("ok", aff=-7.0, passed=True, smiles="CCO")
+        bad = candidate("bad", aff=-7.0, passed=True, smiles="CCO")
+        bad["docking_success"] = False
+        scored = {c["ligand"]: c for c in rs.compute_scores([ok, bad])}
+        self.assertEqual(scored["bad"]["docking_status"], "docking_failed")
+        self.assertLess(scored["bad"]["remedia_score"], scored["ok"]["remedia_score"])
+
+    def test_failed_dock_score_capped_below_pose_weight(self):
+        # A docking failure loses the pose weight from the numerator but keeps it
+        # in the denominator, so its score can never exceed 1 - pose_weight (0.6),
+        # however strong its ADMET/drug-likeness/diversity are.  A well-docked
+        # candidate can exceed that ceiling — so a failure cannot be rescued to
+        # the top.
+        cands = [
+            candidate("winner", aff=-9.0, passed=True, viol="-", mw=320, logp=2.0,
+                      tpsa=70, hbd=1, hba=4, smiles="CCO"),
+            candidate("fail", aff=None, passed=True, viol="-", mw=320, logp=2.0,
+                      tpsa=70, hbd=1, hba=4, smiles="c1ccccc1CCN"),
+        ]
+        scored = {c["ligand"]: c for c in rs.compute_scores(cands)}
+        self.assertEqual(scored["fail"]["docking_status"], "docking_failed")
+        self.assertLessEqual(scored["fail"]["remedia_score"], 0.6 + 1e-9)
+        self.assertGreater(scored["winner"]["remedia_score"], scored["fail"]["remedia_score"])
+
+    def test_pose_free_run_not_penalised(self):
+        # No candidate has any affinity/confidence: this is a pose-free run, not a
+        # failure — the pose weight is renormalised out (graceful degradation),
+        # docking_status is "no_pose", and scores stay non-null.
+        cands = [
+            {"ligand": "a", "admet_pass": True, "violations": "-", "smiles": "CCO"},
+            {"ligand": "b", "admet_pass": True, "violations": "-", "smiles": "c1ccccc1CCN"},
+        ]
+        scored = rs.compute_scores(cands)
+        for c in scored:
+            self.assertEqual(c["docking_status"], "no_pose")
+            self.assertIsNotNone(c["remedia_score"])
+            self.assertIsNone(c["pose_score"])
+
+    def test_docking_status_scored_when_all_dock(self):
+        scored = rs.compute_scores([
+            candidate("a", aff=-9.0, passed=True, smiles="CCO"),
+            candidate("b", aff=-6.0, passed=True, smiles="CCN"),
+        ])
+        for c in scored:
+            self.assertEqual(c["docking_status"], "scored")
+
+
 class TestCSV(unittest.TestCase):
     def test_write_ranking_csv(self):
         scored = rs.compute_scores([candidate("a", aff=-7, passed=True, smiles="CCO")])

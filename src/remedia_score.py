@@ -214,18 +214,45 @@ def compute_scores(
         if s:
             counts[s] = counts.get(s, 0) + 1
 
+    # "Pose expected" = at least one molecule in this batch actually produced an
+    # affinity or a confidence.  Used to tell a *docking failure* (some molecules
+    # docked, this one did not) apart from a *pose-free run* (no pose engine at
+    # all), so only genuine failures are penalised.
+    pose_expected = bool(aff_norm) or bool(conf_norm)
+
     enriched: list[dict[str, Any]] = []
     for i, cand in enumerate(candidates):
         out = dict(cand)
         out["scaffold"] = scaffolds[i]
 
-        # pose
+        # pose — the measured value; ``None`` when this molecule produced no
+        # affinity/confidence of its own.
         pose_parts = []
         if i in aff_norm:
             pose_parts.append(aff_norm[i])
         if i in conf_norm:
             pose_parts.append(conf_norm[i])
         pose = round(sum(pose_parts) / len(pose_parts), 4) if pose_parts else None
+
+        # Docking status + penalty.  A molecule that fails docking must NOT be
+        # rescued to the top by ADMET/drug-likeness/diversity alone.  When the
+        # batch produced poses at all (``pose_expected``) but this molecule has
+        # none — or its row is explicitly flagged ``docking_success=False`` — the
+        # pose component is fed to the weighted mean as ``0.0`` rather than
+        # dropped, so it stays in the denominator and the score ceiling falls by
+        # the pose weight.  When *no* molecule docked (pose engine absent) the
+        # pose weight is renormalised out as before, so a pose-free run still
+        # ranks sensibly.
+        explicit_fail = _truthy(_get(cand, "docking_success")) is False
+        if pose_expected and (pose is None or explicit_fail):
+            docking_status = "docking_failed"
+            pose_component = 0.0
+        elif pose is None:
+            docking_status = "no_pose"
+            pose_component = None
+        else:
+            docking_status = "scored"
+            pose_component = pose
 
         # admet
         adm = admet_score(cand)
@@ -240,18 +267,25 @@ def compute_scores(
         # diversity: rarer scaffold → higher
         div = round(1.0 / counts[scaffolds[i]], 4) if scaffolds[i] and counts.get(scaffolds[i]) else None
 
-        components = {"pose": pose, "admet": adm, "druglikeness": dl, "diversity": div}
+        components = {"pose": pose_component, "admet": adm, "druglikeness": dl, "diversity": div}
         out.update({
             "pose_score": pose,
             "admet_score": adm,
             "druglikeness_score": dl,
             "diversity_score": div,
+            "docking_status": docking_status,
             "score_components": components,
             "remedia_score": _weighted(components, weights),
         })
         enriched.append(out)
 
-    enriched.sort(key=lambda c: (c["remedia_score"] is None, -(c["remedia_score"] or 0.0)))
+    # Sort by score (higher first); a docking failure sinks below an otherwise
+    # equal scored candidate, and ``None`` scores sink last.
+    enriched.sort(key=lambda c: (
+        c["remedia_score"] is None,
+        -(c["remedia_score"] or 0.0),
+        c.get("docking_status") == "docking_failed",
+    ))
     for rank, item in enumerate(enriched, 1):
         item["rank"] = rank
     return enriched
@@ -326,7 +360,8 @@ def diversity_report(candidates: Iterable[dict[str, Any]]) -> dict[str, Any]:
 RANKING_FIELDS = [
     "rank", "ligand", "molecule", "smiles", "remedia_score",
     "pose_score", "admet_score", "druglikeness_score", "diversity_score",
-    "affinity_kcal_mol", "pose_confidence", "admet_pass", "violations", "scaffold",
+    "docking_status", "affinity_kcal_mol", "pose_confidence", "admet_pass",
+    "violations", "scaffold",
 ]
 
 

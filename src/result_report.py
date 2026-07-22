@@ -364,7 +364,7 @@ ul{{padding-left:20px}}
 </div></header>
 <section class="section"><h2>Yönetici özeti</h2><p><strong>En iyi öngörülen aday:</strong> {best_text}</p>
 <p><strong>Ana veri tablosu:</strong> <code>{html.escape(primary_table or 'Bulunamadı')}</code></p>
-<p class="warning"><strong>Önemli:</strong> Bu sonuçlar deneysel doğrulama değildir. GNINA skoru bağlanma eğilimi için hesaplamalı bir ön elemedir; toksisite, etkinlik, seçicilik ve klinik uygunluk sonucu olarak yorumlanmamalıdır.</p></section>
+<p class="warning"><strong>Önemli:</strong> Bu sonuçlar deneysel doğrulama değildir. GNINA skoru bağlanma eğilimi için hesaplamalı bir ön elemedir; toksisite, etkinlik, seçicilik ve klinik uygunluk sonucu olarak yorumlanmamalıdır. Bu sonuçlar hesaplamalı tahmindir; deneysel aktivite, toksisite veya klinik uygunluk kanıtı değildir.</p></section>
 <section class="section"><h2>En yüksek sıralı adaylar</h2>{image_html}{_html_table(candidates)}</section>
 <section class="section"><h2>Nasıl yorumlanmalı?</h2>
 <ul><li><strong>GNINA affinity:</strong> Daha negatif skor genellikle daha iyi öngörülen bağlanmayı ifade eder; farklı hedefler arasında doğrudan kıyas yapılmamalıdır.</li>
