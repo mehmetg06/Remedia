@@ -77,17 +77,17 @@ def ranking_explanation(candidate: dict[str, Any]) -> str:
     if passed and violations not in {"", "-"}:
         text = text.replace(
             f"ADMET filtresini geçiyor ({violations} ihlal notu)",
-            "Lipinski/Veber ön filtresini geçiyor "
+            "ADMET (Lipinski/Veber) ön filtresini geçiyor "
             f"(kuralların izin verdiği tek ihlal: {violations})",
         )
     elif passed:
         text = text.replace(
             "ADMET filtresini geçiyor",
-            "Lipinski/Veber ön filtresini ihlalsiz geçiyor",
+            "ADMET (Lipinski/Veber) ön filtresini ihlalsiz geçiyor",
         )
-    elif failed and "Lipinski/Veber ön filtresini geçemiyor" not in text:
+    elif failed and "ADMET (Lipinski/Veber) ön filtresini geçemiyor" not in text:
         suffix = f" ({violations})" if violations not in {"", "-"} else ""
-        text = text.rstrip(".") + f", Lipinski/Veber ön filtresini geçemiyor{suffix}."
+        text = text.rstrip(".") + f", ADMET (Lipinski/Veber) ön filtresini geçemiyor{suffix}."
     return text
 
 

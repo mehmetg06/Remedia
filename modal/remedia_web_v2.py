@@ -1,12 +1,22 @@
-"""Stable single-page Remedia Modal app.
+"""Stable single-page Remedia Modal app with an auto-updating deploy.
 
-Deploy:
+Deploy once:
     modal deploy modal/remedia_web_v2.py
+
+After that, pushing to the tracked GitHub branch (``REMEDIA_GIT_BRANCH``,
+default ``main``) updates the live URL automatically — the worker pulls the
+newest code on every run and a page refresh triggers a throttled pull, so there
+is no need to redeploy or re-open a Modal notebook. Set ``REMEDIA_GIT_URL`` /
+``REMEDIA_GIT_BRANCH`` to point at a different repo or a pinned branch.
+
+The form's "Hız" control selects the GNINA staging mode: ``hizli`` runs a single
+fast pass, ``dengeli`` runs the two-stage fast→accurate screening.
 """
 from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import fcntl
 import io
 import json
 import os
@@ -30,6 +40,21 @@ REINVENT_PATH = VOLUME_PATH / "REINVENT4"
 JOBS_PATH = VOLUME_PATH / "remedia_web_jobs"
 RESULTS_PATH = VOLUME_PATH / "Remedia_results"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# ---------------------------------------------------------------------------
+# Auto-updating deploy.
+#
+# Deploy once with ``modal deploy modal/remedia_web_v2.py``. After that every
+# job run and every page load pulls the newest code from GitHub, so pushing to
+# the tracked branch is enough to update the live app — there is no need to
+# redeploy or touch a Modal notebook again. The tracked branch is configurable
+# via env so the URL can be pinned to a stable branch instead of ``main``.
+# ---------------------------------------------------------------------------
+GIT_URL = os.environ.get("REMEDIA_GIT_URL", "https://github.com/mehmetg06/Remedia.git")
+GIT_BRANCH = os.environ.get("REMEDIA_GIT_BRANCH", "main")
+GIT_STAMP = VOLUME_PATH / ".remedia_git_stamp"
+GIT_LOCK = VOLUME_PATH / ".remedia_git.lock"
+GIT_PULL_THROTTLE_SECONDS = 20
 
 image = (
     modal.Image.from_registry(
@@ -89,8 +114,27 @@ app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
-def _sync_repo() -> None:
-    """Copy application code without deleting runtime data."""
+def _git(args: list[str], cwd: Path | None = None, timeout: int = 240):
+    return subprocess.run(
+        ["git", *args],
+        cwd=(str(cwd) if cwd else None),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _repo_head() -> str | None:
+    res = _git(["rev-parse", "--short", "HEAD"], cwd=REPO_PATH)
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def _rsync_baked() -> None:
+    """Offline fallback: copy the code baked into the image at deploy time.
+
+    Used only when GitHub is unreachable, so the app still starts on a fresh
+    volume even without network access to the repository.
+    """
     REPO_PATH.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
@@ -103,11 +147,72 @@ def _sync_repo() -> None:
             "/opt/remedia/",
             f"{REPO_PATH}/",
         ],
-        check=True,
+        check=False,
     )
+
+
+def _git_sync(force: bool = False) -> str | None:
+    """Bring ``/workspace/Remedia`` to the latest ``GIT_BRANCH`` commit.
+
+    This is what removes the redeploy loop: the code is pulled from GitHub at
+    run time instead of being frozen into the image at deploy time. Runtime data
+    (``Remedia_results/``, ``remedia_cache/``, ``remedia_web_jobs/``,
+    ``REINVENT4/``, ``boltz_cache/``) lives *outside* ``REPO_PATH``, so a hard
+    reset of the checkout never destroys results. Falls back to the image-baked
+    copy when GitHub cannot be reached.
+    """
+    VOLUME_PATH.mkdir(parents=True, exist_ok=True)
     JOBS_PATH.mkdir(parents=True, exist_ok=True)
     RESULTS_PATH.mkdir(parents=True, exist_ok=True)
     REINVENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    def _throttled() -> bool:
+        if force or not (REPO_PATH / "src").is_dir():
+            return False
+        try:
+            return time.time() - float(GIT_STAMP.read_text()) < GIT_PULL_THROTTLE_SECONDS
+        except Exception:
+            return False
+
+    if _throttled():
+        return _repo_head()
+
+    lock_fd = open(GIT_LOCK, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # Another container may have synced while we waited on the lock.
+        if _throttled():
+            return _repo_head()
+
+        try:
+            if (REPO_PATH / ".git").is_dir():
+                fetch = _git(["fetch", "--depth", "1", "origin", GIT_BRANCH], cwd=REPO_PATH)
+                if fetch.returncode == 0:
+                    _git(["reset", "--hard", f"origin/{GIT_BRANCH}"], cwd=REPO_PATH)
+                elif not (REPO_PATH / "src").is_dir():
+                    _rsync_baked()
+            else:
+                # No git checkout yet (fresh volume or legacy rsync copy):
+                # replace it with a shallow clone of the tracked branch.
+                if REPO_PATH.exists():
+                    shutil.rmtree(REPO_PATH, ignore_errors=True)
+                clone = _git(
+                    ["clone", "--depth", "1", "--branch", GIT_BRANCH, GIT_URL, str(REPO_PATH)]
+                )
+                if clone.returncode != 0:
+                    _rsync_baked()
+        except Exception:
+            if not (REPO_PATH / "src").is_dir():
+                _rsync_baked()
+
+        with contextlib.suppress(Exception):
+            GIT_STAMP.write_text(str(time.time()))
+        with contextlib.suppress(Exception):
+            volume.commit()
+        return _repo_head()
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def _job_file(job_id: str) -> Path:
@@ -348,8 +453,13 @@ def run_job(
     molecule_count: int,
     generator: str = "reinvent4",
     pose_engine: str = "gnina",
+    speed: str = "hizli",
 ) -> None:
-    _sync_repo()
+    # Migrate any in-repo REINVENT4 out to its persistent sibling location
+    # *before* syncing, so the one-time legacy→git checkout swap in _git_sync
+    # (which may replace the old rsync copy) never deletes an installed model.
+    _prepare_reinvent_location()
+    _git_sync(force=True)
     _prepare_reinvent_location()
     volume.commit()
     _write_job(
@@ -372,6 +482,12 @@ def run_job(
         if src not in sys.path:
             sys.path.insert(0, src)
 
+        # Speed control: "hizli" runs a single fast GNINA pass (skips the second,
+        # slower accurate process); "dengeli" keeps the two-stage fast→accurate
+        # screening. For DiffDock/Boltz/hybrid engines this only affects the
+        # GNINA portion of the run.
+        docking_mode = "iki_asamali" if str(speed).lower() == "dengeli" else "sadece_fast"
+
         run_pipeline = _load_pipeline()
         settings = {
             "uniprot_id": uniprot_id,
@@ -380,7 +496,7 @@ def run_job(
             "pose_engine": pose_engine,
             "generate_n": molecule_count,
             "profile": "balanced",
-            "docking_mode": "iki_asamali",
+            "docking_mode": docking_mode,
             "box_dim": 20,
             "top_fraction": 0.10,
             "ga_generations": 3,
@@ -516,12 +632,16 @@ button,a.btn{width:100%;display:block;text-align:center;border:0;border-radius:1
 <label class="choice"><input type="radio" name="pose" value="boltz2"> Boltz-2</label>
 <label class="choice"><input type="radio" name="pose" value="hybrid"> Hybrid Validation</label>
 </div></div>
+<div class="field"><label>Hız</label><div class="choices">
+<label class="choice"><input type="radio" name="speed" value="hizli" checked> Hızlı</label>
+<label class="choice"><input type="radio" name="speed" value="dengeli"> Dengeli</label>
+</div><p class="muted">Hızlı: tek GNINA taraması. Dengeli: iki aşamalı (hızlı → ayrıntılı doğrulama), daha yavaş ama daha sağlam skor.</p></div>
 <button id="start" type="submit">Remedia’yı Başlat</button><p class="muted">Sonuç paketi açıklamalı HTML raporu, tekleştirilmiş aday tablosu, veri sözlüğü, çalışma ayarları ve teknik log içerecektir.</p></form>
 <section id="progress" class="progress"><div class="progress-head"><div class="progress-title">İşlem ilerliyor</div><div id="percent" class="percent">0%</div></div><div class="bar"><div id="fill" class="fill"></div></div><div class="stages"><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div><div class="stage"></div></div><div id="step" class="step"><span class="spinner"></span> Hazırlanıyor</div><div id="message" class="muted"></div><div id="error"></div></section>
 <section id="done" class="done"><div id="doneNote" class="done-note">Açıklamalı rapor ve ham veriler hazır.</div><a id="report" class="btn secondary" target="_blank">Raporu tarayıcıda aç</a><a id="download" class="btn">Tam sonuç paketini indir</a><button class="retry" onclick="location.reload()">Yeni işlem</button></section>
 <script>
 const form=document.querySelector('#form'),progress=document.querySelector('#progress'),fill=document.querySelector('#fill'),step=document.querySelector('#step'),msg=document.querySelector('#message'),err=document.querySelector('#error'),done=document.querySelector('#done'),pct=document.querySelector('#percent'),stages=[...document.querySelectorAll('.stage')];
-form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value),generator:document.querySelector('input[name=gen]:checked').value,pose_engine:document.querySelector('input[name=pose]:checked').value})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
+form.addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#start').disabled=true;progress.style.display='block';const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uniprot_id:document.querySelector('#u').value,molecule_count:Number(document.querySelector('#n').value),generator:document.querySelector('input[name=gen]:checked').value,pose_engine:document.querySelector('input[name=pose]:checked').value,speed:document.querySelector('input[name=speed]:checked').value})});const x=await r.json();if(!r.ok){showError(x.detail||'Başlatılamadı');return;}poll(x.job_id);});
 function paint(x){const p=Math.max(0,Math.min(100,Number(x.progress_percent??((x.step||1)/5*100))));fill.style.width=p+'%';pct.textContent=Math.round(p)+'%';stages.forEach((el,i)=>el.classList.toggle('active',i<(x.step||1)));}
 function detail(x){let m=x.message||'';if(x.items_total){m=(x.stage_label||x.task||m)+' ('+(x.items_done||0)+'/'+x.items_total+')';}if(x.eta_seconds){m+=' · ~'+Math.round(x.eta_seconds)+'s kaldı';}return m;}
 async function poll(id){try{const r=await fetch('/status/'+id,{cache:'no-store'}),x=await r.json();paint(x);msg.textContent=detail(x);if(x.state==='done'){step.textContent='Tamamlandı';done.style.display='block';document.querySelector('#download').href='/download/'+id;document.querySelector('#report').href='/report/'+id;document.querySelector('#doneNote').textContent=`${x.candidate_count??0} aday bulundu; ${x.scored_candidate_count??0} aday için docking skoru okundu.`;return;}if(x.state==='error'){showError((x.message||'İşlem başarısız')+(x.technical_excerpt?'\n\nTeknik ayrıntı:\n'+x.technical_excerpt:''));return;}const title=x.stage_label||((x.step||1)+'/5');step.innerHTML='<span class="spinner"></span> '+title;setTimeout(()=>poll(id),1800);}catch(e){msg.textContent='Bağlantı bekleniyor…';setTimeout(()=>poll(id),3500);}}
@@ -543,6 +663,10 @@ def web():
 
     @api.get("/", response_class=HTMLResponse)
     def home():
+        # Refreshing the URL pulls the newest code from GitHub (throttled), so a
+        # push is reflected on the next run without redeploying.
+        with contextlib.suppress(Exception):
+            _git_sync()
         return HTML
 
     @api.post("/start")
@@ -569,6 +693,9 @@ def web():
         pose_engine = str(payload.get("pose_engine", "gnina")).strip().lower()
         if pose_engine not in {"gnina", "diffdock", "boltz2", "hybrid"}:
             pose_engine = "gnina"
+        speed = str(payload.get("speed", "hizli")).strip().lower()
+        if speed not in {"hizli", "dengeli"}:
+            speed = "hizli"
 
         job_id = uuid.uuid4().hex
         JOBS_PATH.mkdir(parents=True, exist_ok=True)
@@ -582,9 +709,10 @@ def web():
             molecule_count=molecule_count,
             generator=generator,
             pose_engine=pose_engine,
+            speed=speed,
         )
         await volume.commit.aio()
-        await run_job.spawn.aio(job_id, uniprot, molecule_count, generator, pose_engine)
+        await run_job.spawn.aio(job_id, uniprot, molecule_count, generator, pose_engine, speed)
         return {"job_id": job_id}
 
     async def _read_job(job_id: str) -> dict:
