@@ -248,6 +248,32 @@ class ProgressReporter:
         """Emit an informational (or warning) message without changing counts."""
         self._emit(message=message, level=level, extra=extra)
 
+    def event(
+        self,
+        event_type: str,
+        *,
+        message: str | None = None,
+        level: str = LEVEL_INFO,
+        **payload: Any,
+    ) -> dict[str, Any]:
+        """Emit a discrete, typed **live event** and return the event dict.
+
+        Unlike :meth:`update`, this does not touch stage/item counters or the
+        percent — it rides the same structured-event transport (``progress.jsonl``
+        + stdout sentinel + ``sink``) carrying an ``event`` field plus an arbitrary
+        ``payload``, so the live console can render per-candidate activity
+        (``candidate_generated``, ``candidate_scored``, ``leader_changed``,
+        ``heartbeat``, …; see the roadmap §6.2 catalogue).  Payload keys must avoid
+        the reserved schema field names (``stage``, ``percent``, ``message``, …).
+        """
+        extra = {"event": event_type, **payload}
+        text = message if message is not None else event_type.replace("_", " ")
+        emitted = self._build_event(
+            stage_key=self._current.key, level=level, message=text, extra=extra
+        )
+        self._publish(emitted)
+        return emitted
+
     def warning(self, message: str, **extra: Any) -> None:
         self._emit(message=message, level=LEVEL_WARNING, extra=extra)
 

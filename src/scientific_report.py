@@ -39,6 +39,49 @@ from typing import Any
 REPORT_DIR_NAME = "00_REMEDIA_REPORT"
 TOP_N = 12
 
+#: User-facing name for the composite score.  It is NOT a trained model and NOT a
+#: precise measurement — a temporary, fixed-weight heuristic ranking component
+#: (roadmap §2.5/§12.6), so it is labelled and shown with its sub-scores rather
+#: than as one artificially precise number.
+SCORE_LABEL = "Geçici Heuristik Skor (v0)"
+#: Mandatory scientific disclaimer (roadmap §8), shown verbatim in every report.
+DISCLAIMER = ("Bu sonuçlar hesaplamalı tahmindir; deneysel aktivite, toksisite "
+              "veya klinik uygunluk kanıtı değildir.")
+#: docking_status values that mean "no independent docking score for this molecule".
+UNDOCKED_STATUSES = ("docking_failed", "no_pose")
+
+
+def _score_band(score: Any) -> str:
+    """Coarse qualitative band, so the score is not read as false precision."""
+    if score is None:
+        return "—"
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return "—"
+    if s >= 0.75:
+        return "yüksek"
+    if s >= 0.5:
+        return "orta"
+    return "düşük"
+
+
+def _is_undocked(cand: dict[str, Any]) -> bool:
+    status = str(cand.get("docking_status") or "")
+    if status:
+        return status in UNDOCKED_STATUSES
+    # Older runs without docking_status: treat a missing affinity as undocked.
+    return cand.get("affinity_kcal_mol") is None and cand.get("pose_confidence") is None
+
+
+def _docking_reason(cand: dict[str, Any]) -> str:
+    status = str(cand.get("docking_status") or "")
+    if status == "docking_failed":
+        return "Docking skoru üretilemedi (pose cezası uygulandı)"
+    if status == "no_pose":
+        return "Docking çalıştırılmadı"
+    return "Bağımsız docking skoru yok"
+
 
 # ======================================================================
 # Loading + enrichment
@@ -117,6 +160,7 @@ def load_candidates(root: Path) -> list[dict[str, Any]]:
                                             "fast_affinity_kcal_mol")),
             "pose_confidence": _f(_first(row, "pose_confidence", "confidence", "diffdock_confidence")),
             "admet_status": _first(row, "admet_pass", "admet_status") or _first(p, "pass", "admet_status") or "",
+            "docking_status": _first(row, "docking_status") or "",
             "violations": _first(row, "violations") or _first(p, "violations") or "",
             "mw": _f(_first(row, "mw", "MW") or _first(p, "MW", "mw")),
             "logp": _f(_first(row, "logp", "LogP") or _first(p, "LogP", "logp")),
@@ -166,8 +210,13 @@ def ranking_explanation(cand: dict[str, Any]) -> str:
     div = cand.get("diversity_score")
     if div is not None and div >= 0.9:
         bits.append("özgün bir kimyasal iskelet")
+    if _is_undocked(cand):
+        bits.append(_docking_reason(cand).lower())
     score = cand.get("remedia_score")
-    head = f"#{cand.get('rank')} sırada" + (f", Remedia Score {score:.3f}" if score is not None else "")
+    if score is not None:
+        head = f"#{cand.get('rank')} sırada, {SCORE_LABEL} {score:.2f} ({_score_band(score)})"
+    else:
+        head = f"#{cand.get('rank')} sırada"
     if not bits:
         return f"{head}."
     return f"{head}: " + ", ".join(bits) + "."
@@ -266,6 +315,7 @@ def executive_summary(
     scored = [c for c in candidates if c.get("affinity_kcal_mol") is not None]
     passed = [c for c in candidates if str(c.get("admet_status") or "").lower()
               in {"true", "pass", "passed", "geçti", "gecti", "ok"}]
+    undocked = [c for c in candidates if _is_undocked(c)]
     best = candidates[0] if candidates else None
     lines = [
         f"Hedef {target} için {len(candidates)} aday değerlendirildi; "
@@ -274,8 +324,13 @@ def executive_summary(
     if best:
         lines.append(
             f"En yüksek sıralı aday {best['molecule']} "
-            f"(Remedia Score {_fmt(best.get('remedia_score'))}, "
+            f"({SCORE_LABEL} {_fmt(best.get('remedia_score'), 2)} · {_score_band(best.get('remedia_score'))}, "
             f"GNINA {_fmt(best.get('affinity_kcal_mol'), 2)} kcal/mol)."
+        )
+    if undocked:
+        lines.append(
+            f"{len(undocked)} aday için bağımsız docking skoru üretilemedi; bunlar "
+            "cezalandırıldı ve raporda ayrı listelendi."
         )
     lines.append(
         f"Kimyasal çeşitlilik: {diversity.get('unique_scaffolds', 0)} benzersiz iskelet / "
@@ -445,10 +500,17 @@ def _card_html(cand: dict[str, Any], explanation: str, binding: str, sim: dict[s
         sim_html = (f"<p class='sim'>En yakın bilinen ligand: "
                     f"<b>{html.escape(str(sim.get('nearest_known') or '—'))}</b> "
                     f"(benzerlik {sim.get('similarity')}, {sim.get('method')})</p>")
+    score = cand.get('remedia_score')
     return f"""<div class="card">
 <div class="card-head"><span class="rank">#{cand.get('rank')}</span>
 <span class="mol">{html.escape(str(cand.get('molecule')))}</span>
-<span class="score">Remedia {html.escape(_fmt(cand.get('remedia_score')))}</span></div>
+<span class="score" title="{html.escape(SCORE_LABEL)} — eğitilmiş model değil">Heuristik v0 {html.escape(_fmt(score, 2))} · {_score_band(score)}</span></div>
+<div class="subscores">
+{cell('Pose alt-skor', cand.get('pose_score'))}
+{cell('ADMET alt-skor', cand.get('admet_score'))}
+{cell('İlaç-benzerliği', cand.get('druglikeness_score'))}
+{cell('Çeşitlilik', cand.get('diversity_score'))}
+</div>
 <div class="props">
 {cell('GNINA kcal/mol', cand.get('affinity_kcal_mol'))}
 {cell('Pose conf.', cand.get('pose_confidence'))}
@@ -457,13 +519,42 @@ def _card_html(cand: dict[str, Any], explanation: str, binding: str, sim: dict[s
 {cell('TPSA', cand.get('tpsa'))}
 {cell('HBD', cand.get('hbd'))}
 {cell('HBA', cand.get('hba'))}
-{cell('İlaç-benzerliği', cand.get('druglikeness_score'))}
+{cell('Docking durumu', cand.get('docking_status') or '—')}
 </div>
 <p class="smiles">{html.escape(str(cand.get('smiles') or '—'))}</p>
 <p class="why"><b>Neden yüksek sıralandı?</b> {html.escape(explanation)}</p>
 <p class="binding"><b>Bağlanma analizi:</b> {html.escape(binding)}</p>
 {sim_html}
 </div>"""
+
+
+def _undocked_section(undocked: list[dict[str, Any]]) -> str:
+    """Separate section for candidates without an independent docking score.
+
+    Roadmap §5/§12.7: docking is not the main ranking motor and its failures must
+    be *shown*, not silently absorbed into the score.
+    """
+    if not undocked:
+        return ""
+    rows = "".join(
+        f"<tr><td>{html.escape(str(c.get('molecule')))}</td>"
+        f"<td>{html.escape(_docking_reason(c))}</td>"
+        f"<td>{html.escape(_fmt(c.get('remedia_score'), 2))} ({_score_band(c.get('remedia_score'))})</td>"
+        f"<td>{html.escape(_fmt(c.get('admet_score'), 2))}</td>"
+        f"<td class='smiles'>{html.escape(str(c.get('smiles') or '—'))}</td></tr>"
+        for c in undocked
+    )
+    return (
+        f"<section class=\"section\"><h2>Docking sonucu olmayan / doğrulanamayan adaylar "
+        f"({len(undocked)})</h2>"
+        "<p class=\"muted\">Bu adaylar için bağımsız docking kontrolü bir skor üretmedi. "
+        "Ana sıralamada pose bileşeni cezalandırılır (skor tavanı düşer) ve buraya ayrılırlar; "
+        "docking/pose araçları bir <b>bağımsız fiziksel kontrol</b>dür, bağlanma veya etkinlik "
+        "kanıtı değildir.</p>"
+        "<table class=\"undocked\"><thead><tr><th>Molekül</th><th>Durum</th>"
+        f"<th>{html.escape(SCORE_LABEL)}</th><th>ADMET alt-skor</th><th>SMILES</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></section>"
+    )
 
 
 def build_html(
@@ -478,11 +569,14 @@ def build_html(
     diversity: dict[str, Any],
     figures: dict[str, str],
 ) -> str:
+    scored_cands = [c for c in candidates if not _is_undocked(c)]
+    undocked_cands = [c for c in candidates if _is_undocked(c)]
     cards = "".join(
         _card_html(c, explanations.get(c["molecule"], ""), bindings.get(c["molecule"], ""),
                    similarity.get(c["molecule"]))
-        for c in candidates[:TOP_N]
+        for c in scored_cands[:TOP_N]
     )
+    undocked_html = _undocked_section(undocked_cands)
     fig_html = "".join(
         f"<figure><img src='{fname}' alt='{key}'><figcaption>{html.escape(key)}</figcaption></figure>"
         for key, fname in figures.items()
@@ -503,7 +597,12 @@ h1{{font-size:32px;margin:0 0 4px}}h2{{margin:0 0 14px;font-size:22px}}
 .card-head{{display:flex;align-items:center;gap:10px;margin-bottom:10px}}.rank{{background:#171717;color:#fff;border-radius:8px;padding:2px 8px;font-weight:800}}
 .mol{{font-weight:800}}.score{{margin-left:auto;color:#333;font-weight:700}}
 .props{{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:8px}}
+.subscores{{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:8px}}
+.subscores .prop{{background:#f0f0ec;border-color:#dcdcd4}}
 .prop{{display:flex;justify-content:space-between;background:#fff;border:1px solid #eee;border-radius:8px;padding:5px 9px;font-size:13px}}
+table.undocked{{width:100%;border-collapse:collapse;font-size:13px}}
+table.undocked th,table.undocked td{{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}}
+table.undocked th{{background:#f7f7f4}}table.undocked td.smiles{{font-family:ui-monospace,monospace;font-size:11px;overflow-wrap:anywhere}}
 .smiles{{font-family:ui-monospace,monospace;font-size:12px;overflow-wrap:anywhere;background:#fff;border:1px solid #eee;border-radius:8px;padding:6px}}
 .why,.binding,.sim{{font-size:13px;margin:8px 0 0}}
 .metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:8px}}.metric{{background:#f7f7f4;border-radius:12px;padding:12px}}.metric b{{display:block;font-size:22px}}
@@ -521,11 +620,16 @@ figure{{margin:0}}figure img{{max-width:100%;border:1px solid var(--line);border
 <div class="metric">Çeşitlilik skoru<b>{div.get('diversity_score', 0)}</b></div>
 <div class="metric">En büyük küme<b>{div.get('largest_cluster', 0)}</b></div>
 </div>
-<p class="warn"><b>Önemli:</b> Skorlar hesaplamalı tahmindir; toksisite, etkinlik veya
-klinik uygunluk kanıtı değildir.</p></section>
+<p class="warn"><b>Önemli:</b> {html.escape(DISCLAIMER)} <br>
+<b>{html.escape(SCORE_LABEL)}</b> eğitilmiş bir model değil, sabit ağırlıklı geçici bir
+sıralama bileşenidir (pose + ADMET + ilaç-benzerliği + çeşitlilik); tek başına kesin
+bir değer olarak yorumlanmamalıdır. Bağımsız docking skoru üretilemeyen adaylar
+cezalandırılır ve aşağıda ayrı listelenir.</p></section>
 
-<section class="section"><h2>Aday kartları (en iyi {min(TOP_N, len(candidates))})</h2>
+<section class="section"><h2>Skorlanan adaylar (en iyi {min(TOP_N, len(scored_cands))} / {len(scored_cands)})</h2>
 <div class="grid">{cards}</div></section>
+
+{undocked_html}
 
 <section class="section"><h2>Yayın figürleri</h2>
 {('<div class="figs">' + fig_html + '</div>') if fig_html else '<p class="muted">Figürler bu ortamda üretilemedi (matplotlib/RDKit gerekli).</p>'}
@@ -704,7 +808,7 @@ def _write_readme(report_dir: Path, target: str, summary: str,
         "-" * 18,
         "  report.html            İnsan-dostu bilimsel rapor (tarayıcıda aç).",
         "  candidate_overview.csv  Tüm adaylar, skorlar ve özellikler tablosu.",
-        "  remedia_ranking.csv     Composite Remedia Score sıralaması (üst klasörde).",
+        "  remedia_ranking.csv     Geçici Heuristik Skor (v0) sıralaması (üst klasörde).",
         "  run_manifest.json       Tekrarlanabilirlik: parametreler, tohumlar, sürümler.",
         "  pipeline_log.txt        Çalışmanın tam kaydı (hiçbir hata gizlenmez).",
     ]
@@ -716,16 +820,18 @@ def _write_readme(report_dir: Path, target: str, summary: str,
         "",
         "METRİKLER NASIL YORUMLANIR?",
         "-" * 27,
-        "  Remedia Score : 0-1 arası birleşik skor (yüksek = daha iyi). Bileşenler:",
-        "                  bağlanma pozu, ADMET, ilaç-benzerliği, çeşitlilik.",
-        "  GNINA kcal/mol: Daha negatif = daha güçlü öngörülen bağlanma.",
+        "  Heuristik Skor (v0): 0-1 arası SABİT AĞIRLIKLI geçici sıralama bileşeni",
+        "                  (eğitilmiş model DEĞİL; kesinlik ifade etmez). Bileşenler:",
+        "                  bağlanma pozu, ADMET, ilaç-benzerliği, çeşitlilik. Bağımsız",
+        "                  docking skoru üretemeyen adaylar cezalandırılır ve ayrı listelenir.",
+        "  GNINA kcal/mol: Daha negatif = daha güçlü öngörülen bağlanma (bağımsız kontrol).",
         "  Pose conf.    : DiffDock güven skoru (varsa; yüksek = daha güvenilir poz).",
         "  ADMET         : Basit Lipinski/Veber ön filtresi.",
         "  Çeşitlilik    : Benzersiz kimyasal iskelet oranı.",
     ]
     if best:
         lines += ["", "EN İYİ ADAY", "-" * 11,
-                  f"  {best['molecule']} — Remedia Score {_fmt(best.get('remedia_score'))}, "
+                  f"  {best['molecule']} — {SCORE_LABEL} {_fmt(best.get('remedia_score'), 2)}, "
                   f"GNINA {_fmt(best.get('affinity_kcal_mol'), 2)} kcal/mol",
                   f"  SMILES: {best.get('smiles')}"]
     lines += [

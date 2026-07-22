@@ -146,8 +146,42 @@ class TestBuild(unittest.TestCase):
             sr.build_scientific_report(root, target_uniprot="P00918")
             readme = (root / sr.REPORT_DIR_NAME / "README_FIRST.txt").read_text()
             self.assertIn("ÖNCE BUNU OKU", readme)
-            self.assertIn("Remedia Score", readme)
+            # Score is now labelled as a temporary heuristic, not "Remedia Score".
+            self.assertIn("Heuristik Skor", readme)
             self.assertIn("UYARI", readme)
+
+    def test_report_labels_score_as_heuristic_with_disclaimer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_run_dir(tmp)
+            sr.build_scientific_report(root, target_uniprot="P00918")
+            html = (root / sr.REPORT_DIR_NAME / "report.html").read_text()
+            self.assertIn("Heuristik", html)                 # relabelled score
+            self.assertNotIn(">Remedia <", html)             # no bare "Remedia <score>" chip
+            self.assertIn(sr.DISCLAIMER, html)               # mandatory §8 disclaimer
+
+    def test_docking_failed_candidates_segregated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_csv(root / "remedia_ranking.csv", [
+                {"rank": 1, "ligand": "mol_ok", "molecule": "mol_ok", "smiles": "CCOc1ccccc1",
+                 "remedia_score": 0.9, "pose_score": 0.95, "admet_score": 1.0,
+                 "druglikeness_score": 0.88, "diversity_score": 1.0, "docking_status": "scored",
+                 "affinity_kcal_mol": -9.1, "pose_confidence": "", "admet_pass": "True",
+                 "violations": "-", "scaffold": "c1ccccc1"},
+                {"rank": 2, "ligand": "mol_fail", "molecule": "mol_fail", "smiles": "CCN",
+                 "remedia_score": 0.5, "pose_score": "", "admet_score": 1.0,
+                 "druglikeness_score": 0.7, "diversity_score": 1.0, "docking_status": "docking_failed",
+                 "affinity_kcal_mol": "", "pose_confidence": "", "admet_pass": "True",
+                 "violations": "-", "scaffold": "CCN"},
+            ], ["rank", "ligand", "molecule", "smiles", "remedia_score", "pose_score",
+                "admet_score", "druglikeness_score", "diversity_score", "docking_status",
+                "affinity_kcal_mol", "pose_confidence", "admet_pass", "violations", "scaffold"])
+            sr.build_scientific_report(root, target_uniprot="P00918")
+            html = (root / sr.REPORT_DIR_NAME / "report.html").read_text()
+            self.assertIn("Docking sonucu olmayan", html)    # dedicated section exists
+            # The failed candidate is listed in that section, not among scored cards.
+            section = html.split("Docking sonucu olmayan", 1)[1]
+            self.assertIn("mol_fail", section)
 
     def test_empty_run_still_produces_report(self):
         with tempfile.TemporaryDirectory() as tmp:
